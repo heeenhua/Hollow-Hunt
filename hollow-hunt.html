@@ -1,0 +1,1987 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>HOLLOW HUNT</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}body{display:flex;align-items:center;justify-content:center}
+canvas{image-rendering:pixelated;width:min(100vw,calc(100vh*800/576));aspect-ratio:800/576;background:#000}</style></head>
+<body><canvas id="c" width="800" height="576"></canvas>
+<script>
+(()=>{'use strict';
+// ===== CORE: setup, input, audio, utils =====
+const cv=document.getElementById('c'),g=cv.getContext('2d');
+const W=800,H=576,TS=32;
+const R=(a,b)=>a+Math.random()*(b-a),RI=(a,b)=>Math.floor(R(a,b+1)),PK=a=>a[Math.floor(Math.random()*a.length)];
+const cl=(v,a,b)=>Math.max(a,Math.min(b,v));
+const FONT=(s,b,i)=>`${i?'italic ':''}${b?'bold ':''}${s}px "Courier New",monospace`;
+const DX=[0,1,0,-1],DY=[-1,0,1,0];
+function srng(seed){return()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};}
+
+let G=null,F={};
+const S={mode:'title',t:0,fade:0,fadeTo:0,toast:null,whisper:null,menu:null,b:null,wc:0,shakeT:0,flashA:0,sel:0};
+const P={x:0,y:0,dir:2,ox:0,oy:0,mv:false};
+let M=null,gen=null,cur=null;
+const MAPS={};
+const stage=()=>G?((F.starter?1:0)+(F.slept?1:0)+(F.maren?1:0)+(F.heron?1:0)+(F.kesTower?1:0)):0;
+
+// ----- input -----
+const held={},hit=new Set();
+const kn=e=>e.key.length===1?e.key.toLowerCase():e.key;
+addEventListener('keydown',e=>{
+  const k=kn(e);audio();
+  if(cur&&cur.t==='name'){nameKey(e,k);e.preventDefault();return;}
+  if(!held[k])hit.add(k);held[k]=true;
+  if(k.startsWith('Arrow')||k===' ')e.preventDefault();
+});
+addEventListener('keyup',e=>{held[kn(e)]=false;});
+const isA=()=>hit.has('z')||hit.has('Enter')||hit.has(' ');
+const isB=()=>hit.has('x')||hit.has('Escape')||hit.has('Backspace');
+const isU=()=>hit.has('ArrowUp')||hit.has('w'),isD=()=>hit.has('ArrowDown')||hit.has('s');
+const isL=()=>hit.has('ArrowLeft')||hit.has('a'),isRt=()=>hit.has('ArrowRight')||hit.has('d');
+function heldDir(){
+  if(held.ArrowUp||held.w)return 0;if(held.ArrowDown||held.s)return 2;
+  if(held.ArrowLeft||held.a)return 3;if(held.ArrowRight||held.d)return 1;return -1;
+}
+
+// ----- audio -----
+let AC=null,drone=null;
+function audio(){
+  if(AC)return;
+  try{
+    AC=new(window.AudioContext||window.webkitAudioContext)();
+    const o1=AC.createOscillator(),o2=AC.createOscillator(),gn=AC.createGain();
+    o1.frequency.value=55;o2.frequency.value=55.7;gn.gain.value=.02;
+    o1.connect(gn);o2.connect(gn);gn.connect(AC.destination);o1.start();o2.start();drone={o1,o2,gn};
+  }catch(e){}
+}
+function sfx(f,d=.06,type='square',v=.03){
+  if(!AC)return;
+  try{const o=AC.createOscillator(),gn=AC.createGain();o.type=type;o.frequency.value=f;gn.gain.value=v;
+    gn.gain.exponentialRampToValueAtTime(.0001,AC.currentTime+d);o.connect(gn);gn.connect(AC.destination);o.start();o.stop(AC.currentTime+d);}catch(e){}
+}
+function droneTick(){if(drone){const st=stage();drone.o2.frequency.value=55.7+st*.9;drone.gn.gain.value=.02+st*.006;}}
+
+// ----- drawing helpers -----
+function box(x,y,w,h,fill,stroke){
+  g.fillStyle=fill||'rgba(12,9,20,.93)';g.fillRect(x,y,w,h);
+  g.strokeStyle=stroke||'#e8e0c8';g.lineWidth=3;g.strokeRect(x+1.5,y+1.5,w-3,h-3);
+  g.strokeStyle='#5a5070';g.lineWidth=1;g.strokeRect(x+6.5,y+6.5,w-13,h-13);
+}
+function text(s,x,y,size=18,col='#f0ead8',align='left',bold=false,ital=false){
+  g.font=FONT(size,bold,ital);g.fillStyle=col;g.textAlign=align;g.textBaseline='top';g.fillText(s,x,y);
+}
+function wrap(txt,w,font){
+  g.font=font;const words=txt.split(' '),out=[];let l='';
+  for(const wd of words){const t=l?l+' '+wd:wd;if(g.measureText(t).width>w&&l){out.push(l);l=wd;}else l=t;}
+  if(l)out.push(l);return out;
+}
+function ell(x,y,rx,ry,c,rot=0){g.fillStyle=c;g.beginPath();g.ellipse(x,y,Math.max(.1,rx),Math.max(.1,ry),rot,0,7);g.fill();}
+function tri(a,b,c,d,e,f,col){g.fillStyle=col;g.beginPath();g.moveTo(a,b);g.lineTo(c,d);g.lineTo(e,f);g.closePath();g.fill();}
+
+// ----- script command constructors -----
+const say=(...lines)=>({t:'say',lines});
+const ask=(q,opts)=>({t:'choice',q,opts});
+const wait=ms=>({t:'wait',ms});
+const fade=(a,ms=400)=>({t:'fade',a,ms});
+const cut=(...lines)=>({t:'cut',lines});
+const shake=ms=>({t:'shake',ms});
+const bm=text=>({t:'bmsg',text});
+const bwait=ms=>({t:'bwait',ms});
+function note(k,tx){
+  if(!G||G.notes.some(n=>n.k===k))return;
+  G.notes.push({k,t:tx});S.toast={text:'Journal updated',t:2.4};
+}
+// ===== DATA: types, moves, species =====
+const TCOL={plain:'#a8a090',flame:'#e8602c',tide:'#3a8fd8',bloom:'#58b04a',spark:'#e8c820',gloom:'#8a5ac0'};
+const EFFT={flame:{bloom:2,tide:.5,flame:.5},tide:{flame:2,bloom:.5,tide:.5},bloom:{tide:2,flame:.5,bloom:.5},
+  spark:{tide:2,bloom:.5,spark:.5},gloom:{plain:2,gloom:.5}};
+const eff=(a,d)=>(EFFT[a]&&EFFT[a][d])||1;
+
+const MVraw={
+  tackle:['Tackle','plain',40,100],scratch:['Scratch','plain',40,100],peck:['Quick Peck','plain',35,100],
+  slam:['Body Slam','plain',65,95],growl:['Growl','plain',0,100,'atkdown'],brace:['Brace','plain',0,100,'defup'],mend:['Mend','plain',0,100,'heal'],
+  ember:['Ember','flame',45,100],flamefang:['Flame Fang','flame',65,95],inferno:['Inferno','flame',90,85],
+  bubble:['Bubble','tide',45,100],tidalslap:['Tidal Slap','tide',65,95],surge:['Surge','tide',90,85],
+  vine:['Vine Lash','bloom',45,100],thorn:['Thorn Barrage','bloom',65,95],bloomburst:['Bloom Burst','bloom',90,85],
+  spark:['Spark','spark',45,100],thunderfang:['Thunder Fang','spark',65,95],overload:['Overload','spark',90,85],
+  shade:['Shade Bite','gloom',50,100],nightmaw:['Night Maw','gloom',75,90],hollowcry:['Hollow Cry','gloom',95,85]
+};
+const MV={};for(const k in MVraw){const a=MVraw[k];MV[k]={id:k,name:a[0],type:a[1],pow:a[2],acc:a[3],eff:a[4]};}
+
+// name,type,[hp,atk,def,spd],exp,catch,learn,look,dex[early,late]
+const SP={};
+function sp(id,name,type,b,exp,ct,learn,look,dex){SP[id]={id,name,type,b,exp,catch:ct,learn,look,dex};}
+sp('embit','Embit','flame',[44,52,43,56],60,.4,[[1,'scratch'],[1,'growl'],[5,'ember'],[12,'flamefang'],[20,'inferno']],
+  {shape:'quad',c1:'#e8793a',c2:'#f8d890',feat:'flame'},
+  ['A small fox with a flame at its tail. Warm to the touch and loyal to its Tamer.','Its tail gutters whenever you come near. It keeps one eye on the door. It has never once looked at you directly.']);
+sp('dribb','Dribb','tide',[48,48,50,48],60,.4,[[1,'tackle'],[1,'growl'],[5,'bubble'],[12,'tidalslap'],[20,'surge']],
+  {shape:'blob',c1:'#4a9ae0',c2:'#bfe4ff',feat:'drop'},
+  ['Slippery and playful. Loves puddles and praise.','It hides under the water when you pass. It surfaces only after you have gone.']);
+sp('sprout','Sprout','bloom',[50,46,52,42],60,.4,[[1,'tackle'],[1,'brace'],[5,'vine'],[12,'thorn'],[20,'bloomburst']],
+  {shape:'quad',c1:'#7ac050',c2:'#d8f0a0',feat:'leaf'},
+  ['A bulb-backed grazer that photosynthesises while it naps.','Its leaves curl when you stand close. The Wardens call it Hollow-wilt.']);
+sp('flitwing','Flitwing','plain',[40,45,38,62],50,.6,[[1,'peck'],[1,'growl'],[8,'tackle'],[15,'slam']],
+  {shape:'bird',c1:'#b89c78',c2:'#f0e4cc'},
+  ['A common sky-messenger. Sings at dawn.','Songbirds fall silent within ten paces of the Hollow.']);
+sp('mossling','Mossling','bloom',[55,38,50,28],50,.6,[[1,'tackle'],[4,'vine'],[9,'brace'],[16,'thorn']],
+  {shape:'blob',c1:'#5a8a40',c2:'#9cc870',feat:'leaf'},
+  ['A gentle blob that carpets old stones.','Mosslings pile up in your path and refuse to move. Some call it surrender. Some call it prayer.']);
+sp('puddlet','Puddlet','tide',[44,42,40,50],50,.6,[[1,'bubble'],[1,'tackle'],[9,'brace'],[14,'tidalslap']],
+  {shape:'frog',c1:'#4e8ad0',c2:'#cfe6ff'},
+  ['A rain-loving frog. Its croak predicts storms.','Near you it croaks a single note, over and over. A warning.']);
+sp('zapkit','Zapkit','spark',[38,50,36,64],55,.4,[[1,'tackle'],[3,'spark'],[10,'growl'],[15,'thunderfang']],
+  {shape:'quad',c1:'#e8d040',c2:'#fff4a0',feat:'bolt'},
+  ['A static-furred kit. Zaps when startled.','Its fur stands on end around you, though there is no static in the air.']);
+sp('cindrel','Cindrel','flame',[42,54,38,58],55,.4,[[1,'scratch'],[4,'ember'],[13,'flamefang']],
+  {shape:'quad',c1:'#c04830',c2:'#f0a060',feat:'flame'},
+  ['A coal-feathered pup. Fears nothing.','Fears one thing.']);
+sp('dusklet','Dusklet','gloom',[40,48,40,66],65,.25,[[1,'peck'],[3,'shade'],[10,'growl'],[16,'nightmaw']],
+  {shape:'moth',c1:'#5a4a88',c2:'#a890d8'},
+  ['A night moth drawn to lanterns.','It is not drawn to lanterns. It is drawn to you. It remembers you.']);
+sp('fennick','Fennick','flame',[50,58,48,60],70,.2,[[1,'scratch'],[1,'ember'],[8,'mend'],[10,'flamefang'],[18,'inferno']],
+  {shape:'quad',c1:'#d8602a',c2:'#fff0d0',feat:'flame'},
+  ['A bright-eared fox that partners with Wardens.','Maren\'s partner sleeps beside the door, in case it must run.']);
+sp('thornlet','Thornlet','bloom',[52,56,52,40],65,.3,[[1,'tackle'],[1,'vine'],[8,'brace'],[10,'thorn'],[18,'bloomburst']],
+  {shape:'quad',c1:'#3f8a3c',c2:'#bce08a',feat:'thorn'},
+  ['A thorny little grazer. Prickly with strangers.','Its thorns lie flat around you. Submission, or exhaustion.']);
+sp('marshhop','Marshhop','tide',[58,54,52,45],60,.5,[[1,'bubble'],[1,'slam'],[10,'brace'],[15,'tidalslap'],[20,'surge']],
+  {shape:'frog',c1:'#3f9a8a',c2:'#d0f0e0'},
+  ['A big-mouthed frog of the fen. Swallows lanterns whole.','It dives and does not come up while you are on the boardwalk.']);
+sp('reedback','Reedback','tide',[52,50,48,56],60,.45,[[1,'bubble'],[1,'vine'],[11,'tidalslap'],[16,'mend']],
+  {shape:'serpent',c1:'#4a8a70',c2:'#c8e8b0',feat:'leaf'},
+  ['A river serpent that hides in the reeds.','The reeds lean away from you. So does it.']);
+sp('voltmink','Voltmink','spark',[48,56,44,70],65,.35,[[1,'spark'],[1,'tackle'],[9,'growl'],[12,'thunderfang'],[20,'overload']],
+  {shape:'quad',c1:'#5a5ad8',c2:'#e8e8ff',feat:'bolt'},
+  ['A fast, crackling hunter of the marsh.','It hunts everything in the fen. It does not hunt you.']);
+sp('gloomjaw','Gloomjaw','gloom',[62,66,52,50],80,.15,[[1,'shade'],[1,'growl'],[12,'nightmaw'],[20,'hollowcry']],
+  {shape:'quad',c1:'#3a2a58',c2:'#9a7ac8',feat:'horn'},
+  ['A fear-feeding beast of the deep fen.','It does not bow to the Wardens. It bows to something else.']);
+sp('wardhound','Wardhound','plain',[64,60,60,58],75,.1,[[1,'tackle'],[1,'growl'],[8,'slam'],[14,'brace'],[20,'nightmaw']],
+  {shape:'quad',c1:'#8a8a96',c2:'#e0e0e8',feat:'horn'},
+  ['A loyal guardian bred by the Wardens.','Trained to hunt the Hollow. It trembles when it finds one.']);
+sp('elderhart','Elderhart','gloom',[70,64,64,56],90,.05,[[1,'shade'],[1,'slam'],[14,'nightmaw'],[18,'mend'],[22,'hollowcry']],
+  {shape:'quad',c1:'#2a2a3a',c2:'#d8c8a8',feat:'horn'},
+  ['An ancient antlered Wild. Rarely seen.','It knew you before you had a face.']);
+const DEXORDER=Object.keys(SP);
+
+// ----- mons -----
+const need=L=>Math.floor(.6*L*L*L);
+function calc(m){
+  const b=SP[m.sp].b,L=m.lv,old=m.mhp||0;
+  m.mhp=Math.floor(2*b[0]*L/100)+L+10;
+  m.atk=Math.floor(2*b[1]*L/100)+5;m.def=Math.floor(2*b[2]*L/100)+5;m.spd=Math.floor(2*b[3]*L/100)+5;
+  return m.mhp-old;
+}
+function mkMon(id,lv){
+  const m={sp:id,name:SP[id].name,lv,exp:need(lv),mhp:0,hp:0,moves:[]};
+  calc(m);m.hp=m.mhp;
+  for(const [l,mv] of SP[id].learn)if(l<=lv&&!m.moves.includes(mv))m.moves.push(mv);
+  while(m.moves.length>4)m.moves.shift();
+  m.st={atk:0,def:0};return m;
+}
+function gainExp(m,amt){
+  const out=[];m.exp+=amt;
+  while(m.lv<50&&m.exp>=need(m.lv+1)){
+    m.lv++;const d=calc(m);m.hp=Math.min(m.mhp,m.hp+d);
+    out.push(`${m.name} grew to Lv.${m.lv}!`);
+    for(const [l,mv] of SP[m.sp].learn)if(l===m.lv&&!m.moves.includes(mv)){
+      if(m.moves.length>=4){const f=m.moves.shift();out.push(`${m.name} forgot ${MV[f].name}...`);}
+      m.moves.push(mv);out.push(`${m.name} learned ${MV[mv].name}!`);
+    }
+  }
+  return out;
+}
+const stg=s=>s>=0?(2+s)/2:2/(2-s);
+function calcDmg(a,d,mv){
+  if(!mv.pow)return 0;
+  const A=a.atk*stg(a.st.atk),D=d.def*stg(d.st.def);
+  let dm=((2*a.lv/5+2)*mv.pow*A/D)/50+2;
+  dm*=(SP[a.sp].type===mv.type?1.3:1)*eff(mv.type,SP[d.sp].type)*R(.85,1);
+  return Math.max(1,Math.floor(dm));
+}
+const healAll=()=>{for(const m of [...G.party,...G.box]){m.hp=m.mhp;}};
+
+// ----- journal / flavour lines -----
+const WHISPERS=[
+  [],
+  ['...is it hungry?','the birds went quiet again.','the grass leans away from you.'],
+  ['you remember the taste.','they can hear you coming.','you never sleep. you only close your eyes.'],
+  ['you are not who they say you are.','count the cages. count them.','you have been here before.'],
+  ['it was never a game.','you already know your name.','hungry. hungry. hungry.'],
+  ['go up the stairs.','it is almost over.','you can stop pretending.']
+];
+const FEAR=[
+  [],
+  ['The wild {n} is trembling. It does not run.','The wild {n} goes very still.'],
+  ['The wild {n} will not look at you.','The wild {n} is shaking so hard it can barely stand.','Every bird nearby has gone quiet.'],
+  ['The wild {n} is staring at your hands.','The wild {n} lowers itself to the ground, as if already caged.','It is not afraid of the Cage. It is afraid of you.'],
+  ['The wild {n} bows its head.','The wild {n} whispers something you almost understand.'],
+  ['The wild {n} bows its head. It has been waiting for you.']
+];
+// ===== RENDER: tiles, people, creatures =====
+const SOLID=new Set('#~RrqWwXTBKbHMPFL'.split(''));
+function drawTile(m,ch,tx,ty,sx,sy){
+  const h=((tx*73856093)^(ty*19349663))>>>0,r=(h%97)/97,t=S.t;
+  const fill=c=>{g.fillStyle=c;g.fillRect(sx,sy,TS,TS);};
+  const rc=(c,x,y,w,hh)=>{g.fillStyle=c;g.fillRect(sx+x,sy+y,w,hh);};
+  const grass=()=>{fill('#5a9a46');rc('#6aae54',(h>>3)%26,(h>>6)%26,2,4);rc('#4c8a3c',(h>>9)%26,(h>>4)%26,2,3);};
+  const floor=()=>{fill('#caa56e');rc('#b8935c',0,TS-1,TS,1);if(r<.3)rc('#b8935c',(h>>3)%28,0,1,TS);};
+  switch(ch){
+    case '.':fill('#b89a68');if(r<.45){rc('#a88a5a',(h>>3)%24,(h>>7)%24,3,2);rc('#c8aa78',(h>>5)%26,(h>>9)%26,2,2);}break;
+    case 'g':grass();break;
+    case 'f':grass();rc(['#f0e060','#f08ca0','#fff'][h%3],(h>>3)%24+2,(h>>5)%24+2,4,4);rc('#e8e8a0',(h>>7)%24+2,(h>>9)%24+4,3,3);break;
+    case 'G':fill('#3f8a3c');g.fillStyle='#2f7030';for(let i=0;i<4;i++){const x=(i*9+(h>>i))%26,y=(i*7+(h>>(i+2)))%20;g.fillRect(sx+x,sy+y+4,2,10);g.fillRect(sx+x+3,sy+y+7,2,8);}
+      rc('#58a850',(h>>2)%24,(h>>5)%20,2,6);break;
+    case 'm':fill('#4d7550');rc('#3f6a68',(h>>2)%18,(h>>5)%18,10,5);rc('#5e8a5a',(h>>4)%26,(h>>8)%26,2,6);rc('#3c5f3e',(h>>6)%26,(h>>3)%26,2,5);break;
+    case '=':fill('#9a7648');for(let i=0;i<4;i++)rc(i%2?'#8a6a3e':'#a8834f',0,i*8,TS,7);break;
+    case '~':{fill(m.id==='route2'?'#27483f':'#2d6aa6');g.fillStyle='rgba(255,255,255,.16)';const o=Math.sin(t*2+tx*.7+ty)*4;g.fillRect(sx+6+o,sy+10,12,2);g.fillRect(sx+14-o,sy+22,10,2);break;}
+    case '#':grass();rc('#3a2a1a',13,19,6,11);ell(sx+16,sy+13,14,13,'#2c6632');ell(sx+12,sy+9,8,7,'#3d8442');break;
+    case 'R':case 'r':case 'q':{fill(ch==='R'?'#9a4a3a':ch==='r'?'#3a5a8a':'#4a7a4a');g.fillStyle='rgba(0,0,0,.22)';for(let i=0;i<4;i++)g.fillRect(sx,sy+i*8+7,TS,2);if(r<.5)rc('rgba(255,255,255,.1)',(h>>3)%24,(h>>5)%24,6,3);break;}
+    case 'W':fill('#d8cba6');rc('#b8a888',0,TS-3,TS,3);rc('#b8a888',TS-2,0,2,TS);break;
+    case 'w':fill('#d8cba6');rc('#5a4a38',6,5,20,20);rc('#6a9ac0',8,7,16,16);rc('#bfe4ff',10,9,5,5);rc('#5a4a38',15,7,2,16);break;
+    case 'D':if(m.interior){floor();rc('#8a3a3a',2,8,28,16);rc('#c8a050',2,8,28,2);}else{fill('#d8cba6');rc('#5a3a22',5,2,22,30);rc('#7a5232',7,4,18,28);rc('#e0c060',21,18,3,3);}break;
+    case ',':floor();break;
+    case 'C':fill('#8a2f3a');rc('#c8a050',0,0,2,TS);rc('#c8a050',TS-2,0,2,TS);break;
+    case 'X':fill('#5f5068');g.fillStyle='rgba(0,0,0,.25)';g.fillRect(sx,sy+15,TS,2);g.fillRect(sx+(ty%2?8:20),sy,2,15);g.fillRect(sx+(ty%2?20:8),sy+17,2,15);break;
+    case 'T':floor();rc('#7a5232',0,6,TS,20);rc('#946a42',0,6,TS,6);break;
+    case 'K':floor();rc('#6a4528',0,6,TS,22);rc('#b88a58',0,6,TS,8);break;
+    case 'B':floor();rc('#7a5232',2,4,28,26);rc('#e8e0d0',4,6,24,8);rc('#8a3a5a',4,14,24,14);break;
+    case 'b':floor();rc('#4a3220',1,0,30,32);for(let i=0;i<3;i++){for(let j=0;j<5;j++)rc(['#a84a4a','#4a6aa8','#5a9a5a','#c8a850'][(i+j+tx)%4],3+j*5,3+i*10,4,8);rc('#2a1a10',1,11+i*10,30,2);}break;
+    case 'H':floor();rc('#8a8a98',2,6,28,22);rc('#aaaab8',2,6,28,5);{const a=.5+.5*Math.sin(t*3);ell(sx+16,sy+19,6,6,`rgba(255,120,160,${.5+a*.5})`);}break;
+    case 'P':floor();ell(sx+16,sy+16,12,12,'#8a8a98');ell(sx+14,sy+14,7,7,'#a8a8b8');break;
+    case 'F':grass();rc('#8a6a3e',0,12,TS,4);rc('#8a6a3e',0,20,TS,4);rc('#6a4a2a',4,8,4,20);rc('#6a4a2a',24,8,4,20);break;
+    case 'L':fill('#b89a68');rc('#3a3a44',14,8,4,22);ell(sx+16,sy+8,9,9,'rgba(255,200,100,.25)');ell(sx+16,sy+8,4,4,'#ffd880');break;
+    case 'M':drawMirror(m,sx,sy);break;
+    default:fill('#222');
+  }
+}
+function drawMirror(m,sx,sy){
+  g.fillStyle='#5f5068';g.fillRect(sx,sy,TS,TS);
+  g.fillStyle='#c8a050';g.fillRect(sx+2,sy+1,28,30);
+  g.fillStyle='#8aa4b8';g.fillRect(sx+4,sy+3,24,26);
+  const st=stage();
+  g.fillStyle='rgba(20,20,30,.85)';
+  // reflection: human early, something else later
+  const ox=Math.sin(S.t*1.7)*1.5,hunch=st>=4?3:0;
+  g.beginPath();g.arc(sx+16+ox,sy+13+hunch,5,0,7);g.fill();
+  g.fillRect(sx+11+ox,sy+18+hunch,10,11-hunch);
+  if(st>=2){tri(sx+11+ox,sy+10+hunch,sx+9+ox,sy+3,sx+14+ox,sy+8+hunch,'rgba(20,20,30,.85)');tri(sx+21+ox,sy+10+hunch,sx+23+ox,sy+3,sx+18+ox,sy+8+hunch,'rgba(20,20,30,.85)');}
+  if(st>=1){const b=(Math.floor(S.t*.9)%4===0);g.fillStyle=st>=3?'#ffe070':'#d8d0c0';
+    if(!b||st>=3){g.fillRect(sx+13+ox,sy+12+hunch,2,2);g.fillRect(sx+17+ox,sy+12+hunch,2,2);}}
+  if(st>=3){g.fillStyle='rgba(20,20,30,.9)';for(let i=0;i<3;i++)g.fillRect(sx+7+i*2+ox,sy+24,1,5);}
+  g.fillStyle='rgba(255,255,255,.12)';g.fillRect(sx+5,sy+4,5,24);
+}
+
+// humans (player and NPCs)
+function human(sx,sy,dir,o,walking){
+  const bob=walking?Math.sin(S.t*16)*1.5:0,f=walking?Math.sin(S.t*16)*3:0;
+  g.fillStyle='rgba(0,0,0,.3)';g.beginPath();g.ellipse(sx+16,sy+29,10,4,0,0,7);g.fill();
+  g.fillStyle=o.leg||'#3a3040';g.fillRect(sx+10,sy+22+bob,5,8+f*.3);g.fillRect(sx+17,sy+22+bob,5,8-f*.3);
+  g.fillStyle=o.col||'#6a7ac0';g.fillRect(sx+8,sy+12+bob,16,12);
+  g.fillStyle=o.col2||'rgba(0,0,0,.18)';g.fillRect(sx+8,sy+19+bob,16,2);
+  g.fillStyle=o.glove||'#f0d0b0';g.fillRect(sx+5,sy+14+bob,4,8);g.fillRect(sx+23,sy+14+bob,4,8);
+  g.fillStyle='#f0d0b0';g.beginPath();g.arc(sx+16,sy+9+bob,7,0,7);g.fill();
+  g.fillStyle=o.hair||'#3a2a20';g.beginPath();g.arc(sx+16,sy+7+bob,7.5,Math.PI,0);g.fill();
+  if(dir===0){g.fillRect(sx+9,sy+6+bob,14,6);}
+  if(dir===2){g.fillStyle='#222';g.fillRect(sx+12,sy+9+bob,2,2);g.fillRect(sx+18,sy+9+bob,2,2);}
+  if(dir===1){g.fillStyle='#222';g.fillRect(sx+19,sy+9+bob,2,2);}
+  if(dir===3){g.fillStyle='#222';g.fillRect(sx+11,sy+9+bob,2,2);}
+  if(o.eyes&&dir!==0){g.fillStyle=o.eyes;if(dir===2){g.fillRect(sx+12,sy+9+bob,2,2);g.fillRect(sx+18,sy+9+bob,2,2);}else g.fillRect(sx+(dir===1?19:11),sy+9+bob,2,2);}
+  if(o.mask&&dir!==0){g.fillStyle='#ece6d6';g.beginPath();g.arc(sx+16,sy+10+bob,6,0,Math.PI);g.fill();g.fillRect(sx+10,sy+8+bob,12,3);g.fillStyle='#222';g.fillRect(sx+12,sy+9+bob,2,2);g.fillRect(sx+18,sy+9+bob,2,2);}
+  if(o.hat){g.fillStyle=o.hat;g.fillRect(sx+8,sy+1+bob,16,4);g.fillRect(sx+10,sy-2+bob,12,4);}
+}
+function playerShadow(sx,sy){
+  const st=stage(),k=1+Math.min(st,5)*.14;
+  g.fillStyle='rgba(0,0,0,.32)';g.beginPath();g.ellipse(sx+16,sy+29,10,4,0,0,7);g.fill();
+  if(st<1)return;
+  g.fillStyle='rgba(0,0,0,.26)';
+  const hx=sx+16+20*k,hy=sy+30+8*k;
+  g.beginPath();g.moveTo(sx+10,sy+29);g.lineTo(sx+22,sy+29);g.lineTo(hx+4,hy);g.lineTo(hx-4,hy);g.fill();
+  g.beginPath();g.arc(hx,hy,6*k,0,7);g.fill();
+  if(st>=2){tri(hx-4*k,hy-3*k,hx-8*k,hy-13*k,hx-1*k,hy-5*k,g.fillStyle);tri(hx+4*k,hy-3*k,hx+8*k,hy-13*k,hx+1*k,hy-5*k,g.fillStyle);}
+  if(st>=3){for(let i=0;i<3;i++){g.fillRect(sx+22+i*3,sy+29,1.5,8*k);}}
+}
+
+// creatures
+function drawMon(id,cx,cy,s,o={}){
+  const d=SP[id].look,t=S.t;
+  g.save();g.translate(cx+(o.shake||0),cy+Math.sin(t*3+cx)*(o.fear?.6:2));
+  if(o.flip)g.scale(-1,1);
+  if(o.fear)g.rotate(Math.sin(t*28)*.012);
+  if(o.dead){g.globalAlpha=Math.max(0,1-o.dead);g.translate(0,o.dead*40);}
+  if(o.shrink)g.scale(1-o.shrink*.8,1-o.shrink*.8);
+  const c1=d.c1,c2=d.c2;
+  ell(0,s*.44,s*.5,s*.09,'rgba(0,0,0,.25)');
+  const eye=(x,y,r)=>{ell(x,y,r,r,'#fff');ell(x+r*.25,y+(o.fear?r*.35:0),r*.55,r*.55,'#1a1226');if(o.fear)ell(x-r*.4,y+r*1.2,r*.18,r*.3,'#9fe0ff');};
+  switch(d.shape){
+    case 'quad':
+      ell(-.25*s,.3*s,.07*s,.14*s,c1);ell(.2*s,.3*s,.07*s,.14*s,c1);
+      ell(-.45*s,-.08*s,.16*s,.1*s,c1,-.5);
+      ell(0,0,.45*s,.28*s,c1);ell(.05*s,.1*s,.3*s,.14*s,c2);
+      ell(.38*s,-.17*s,.22*s,.2*s,c1);ell(.5*s,-.1*s,.1*s,.08*s,c2);
+      tri(.28*s,-.3*s,.3*s,-.5*s,.4*s,-.34*s,c1);tri(.44*s,-.32*s,.5*s,-.5*s,.54*s,-.28*s,c1);
+      eye(.44*s,-.2*s,.045*s);
+      if(d.feat==='flame')flame(-.55*s,-.12*s,s*.2);
+      if(d.feat==='bolt')bolt(-.1*s,-.3*s,s*.22);
+      if(d.feat==='leaf'){leaf(.1*s,-.3*s,s*.2,-.4);leaf(-.1*s,-.3*s,s*.18,.3);}
+      if(d.feat==='thorn'){for(let i=0;i<4;i++)tri(-.3*s+i*.16*s,-.25*s,-.26*s+i*.16*s,-.42*s,-.22*s+i*.16*s,-.25*s,'#e8e0a0');}
+      if(d.feat==='horn'){tri(.34*s,-.34*s,.28*s,-.62*s,.42*s,-.36*s,c2);tri(.46*s,-.34*s,.56*s,-.6*s,.52*s,-.3*s,c2);}
+      break;
+    case 'blob':
+      ell(0,0,.4*s,.36*s,c1);ell(0,.1*s,.28*s,.2*s,c2);
+      ell(-.4*s,.05*s,.08*s,.12*s,c1);ell(.4*s,.05*s,.08*s,.12*s,c1);
+      eye(-.13*s,-.08*s,.06*s);eye(.13*s,-.08*s,.06*s);
+      if(d.feat==='drop')tri(-.08*s,-.34*s,0,-.6*s,.08*s,-.34*s,'#9fd8ff');
+      if(d.feat==='leaf'){leaf(-.1*s,-.34*s,s*.22,-.5);leaf(.1*s,-.34*s,s*.2,.5);}
+      break;
+    case 'bird':
+      ell(-.05*s,.05*s,.3*s,.26*s,c1);ell(-.1*s,.1*s,.18*s,.14*s,c2);
+      ell(-.12*s,0,.2*s,.12*s,c2,-.4);
+      ell(.26*s,-.2*s,.15*s,.15*s,c1);tri(.36*s,-.24*s,.56*s,-.17*s,.37*s,-.1*s,'#f0a840');
+      eye(.3*s,-.24*s,.04*s);
+      g.fillStyle='#d09030';g.fillRect(-.1*s,.28*s,.03*s,.14*s);g.fillRect(.06*s,.28*s,.03*s,.14*s);
+      tri(-.3*s,0,-.55*s,-.1*s,-.32*s,.12*s,c1);
+      break;
+    case 'frog':
+      ell(0,.05*s,.42*s,.3*s,c1);ell(0,.14*s,.3*s,.18*s,c2);
+      ell(-.38*s,.2*s,.12*s,.16*s,c1);ell(.38*s,.2*s,.12*s,.16*s,c1);
+      ell(-.2*s,-.24*s,.12*s,.1*s,c1);ell(.2*s,-.24*s,.12*s,.1*s,c1);
+      eye(-.2*s,-.26*s,.06*s);eye(.2*s,-.26*s,.06*s);
+      g.strokeStyle='#1a1226';g.lineWidth=2;g.beginPath();g.arc(0,0,.18*s,.2,Math.PI-.2);g.stroke();
+      break;
+    case 'moth':
+      ell(-.3*s,-.1*s,.3*s,.36*s,c1,-.4);ell(.3*s,-.1*s,.3*s,.36*s,c1,.4);
+      ell(-.3*s,-.1*s,.14*s,.18*s,c2,-.4);ell(.3*s,-.1*s,.14*s,.18*s,c2,.4);
+      ell(0,.05*s,.1*s,.28*s,c1);eye(-.04*s,-.12*s,.035*s);eye(.04*s,-.12*s,.035*s);
+      g.strokeStyle=c2;g.lineWidth=2;g.beginPath();g.moveTo(-.04*s,-.25*s);g.lineTo(-.12*s,-.42*s);g.moveTo(.04*s,-.25*s);g.lineTo(.12*s,-.42*s);g.stroke();
+      break;
+    case 'serpent':
+      for(let i=6;i>=0;i--){const x=-.45*s+i*.14*s,y=Math.sin(i*.9+t*3)*.12*s+.1*s;ell(x,y,.12*s+(i===6?.04*s:0),.12*s+(i===6?.04*s:0),i%2?c1:c2);}
+      eye(.44*s,.02*s,.04*s);
+      if(d.feat==='leaf')leaf(.35*s,-.1*s,s*.18,-.2);
+      break;
+  }
+  g.restore();
+}
+function flame(x,y,s){const f=Math.sin(S.t*12)*.15;tri(x-s*.5,y,x,y-s*(1.2+f),x+s*.5,y,'#f08020');tri(x-s*.28,y,x,y-s*(.8+f),x+s*.28,y,'#ffe060');}
+function bolt(x,y,s){g.fillStyle='#fff070';g.beginPath();g.moveTo(x,y);g.lineTo(x+s*.4,y-s*.3);g.lineTo(x+s*.1,y-s*.3);g.lineTo(x+s*.5,y-s*.9);g.lineTo(x-s*.1,y-s*.4);g.lineTo(x+s*.15,y-s*.4);g.closePath();g.fill();}
+function leaf(x,y,s,rot){g.save();g.translate(x,y);g.rotate(rot);ell(0,-s*.5,s*.22,s*.5,'#78c850');g.restore();}
+
+// world entities
+function drawEnt(e,sx,sy){
+  if(e.vis&&!e.vis())return;
+  switch(e.kind){
+    case 'sign':ell(sx+16,sy+28,9,3,'rgba(0,0,0,.25)');g.fillStyle='#6a4a2a';g.fillRect(sx+14,sy+16,4,14);g.fillStyle='#b8905a';g.fillRect(sx+5,sy+5,22,14);g.fillStyle='#4a3220';g.fillRect(sx+8,sy+9,16,2);g.fillRect(sx+8,sy+13,12,2);break;
+    case 'item':{const b=Math.sin(S.t*4)*1.5;ell(sx+16,sy+27,8,3,'rgba(0,0,0,.3)');g.fillStyle='#caa050';g.fillRect(sx+8,sy+10+b,16,15);g.strokeStyle='#6a4a20';g.lineWidth=2;for(let i=0;i<4;i++){g.beginPath();g.moveTo(sx+11+i*4,sy+10+b);g.lineTo(sx+11+i*4,sy+25+b);g.stroke();}break;}
+    case 'mon':drawMon(e.sp,sx+16,sy+14,e.size||34,{flip:e.flip,fear:e.fear});break;
+    case 'obj':e.draw(sx,sy,e);break;
+    default:human(sx,sy,e.dir,e,e.mv);
+  }
+  if(e.excl){g.fillStyle='#fff';g.fillRect(sx+14,sy-14,4,9);g.fillRect(sx+14,sy-3,4,3);}
+}
+// ===== ENGINE: scripts, overworld =====
+function startScript(fn){gen=fn();cur=null;advance();}
+function advance(v){
+  if(!gen)return;
+  let r;
+  try{r=gen.next(v);}catch(e){console.error(e);document.title='ERR '+e.message;gen=null;cur=null;if(S.mode==='battle'){S.mode='world';S.b=null;}return;}
+  if(r.done){gen=null;cur=null;return;}
+  cur=r.value;initCmd(cur);
+}
+const SPK=/^(@|[A-Z][A-Za-z]+(?: [A-Z][a-z]+)?): ([\s\S]*)$/;
+function parseLines(lines){
+  return lines.map(l=>{
+    l=String(l).replace(/\{n\}/g,G?G.name:'');let who=null;const m=l.match(SPK);
+    if(m){who=m[1]==='@'?G.name:m[1];l=m[2];}
+    return {who,txt:l,w:wrap(l,690,FONT(20))};
+  });
+}
+function initCmd(c){
+  switch(c.t){
+    case 'say':c.i=0;c.ch=0;c.L=parseLines(c.lines);break;
+    case 'cut':c.i=0;c.ch=0;c.L=c.lines.map(l=>({txt:l.replace(/\{n\}/g,G?G.name:''),w:wrap(l.replace(/\{n\}/g,G?G.name:''),620,FONT(24,false,true))}));break;
+    case 'choice':c.sel=0;break;
+    case 'wait':c.left=c.ms/1000;break;
+    case 'shake':S.shakeT=c.ms/1000;advance();break;
+    case 'name':c.buf='';break;
+    case 'walk':c.i=0;break;
+    case 'excl':c.e.excl=true;c.left=.6;break;
+    default:if(initExtra)initExtra(c);
+  }
+}
+function nameKey(e,k){
+  if(k==='Enter'){if(cur.buf.length){sfx(520,.05);advance(cur.buf);}return;}
+  if(k==='Backspace'){cur.buf=cur.buf.slice(0,-1);return;}
+  if(k.length===1&&/[a-z0-9 ]/i.test(k)&&cur.buf.length<10){cur.buf+=e.key;sfx(380,.03);}
+}
+function updCmd(dt){
+  const c=cur;if(!c)return;
+  switch(c.t){
+    case 'say':{
+      const L=c.L[c.i],n=L.txt.length,prev=c.ch;c.ch=Math.min(n,c.ch+dt*60);
+      if(Math.floor(c.ch/3)!==Math.floor(prev/3)&&c.ch<n)sfx(260+RI(0,60),.02,'square',.01);
+      if(isA()){if(c.ch<n)c.ch=n;else{c.i++;c.ch=0;sfx(520,.04);if(c.i>=c.L.length)advance();}}
+      break;}
+    case 'cut':{
+      const L=c.L[c.i];c.ch+=dt;
+      if(isA()&&c.ch>.5){c.i++;c.ch=0;if(c.i>=c.L.length)advance();}
+      break;}
+    case 'choice':{
+      if(isU())c.sel=(c.sel+c.opts.length-1)%c.opts.length;
+      if(isD())c.sel=(c.sel+1)%c.opts.length;
+      if(isA()){sfx(520,.05);advance(c.sel);}
+      break;}
+    case 'wait':c.left-=dt;if(c.left<=0)advance();break;
+    case 'fade':{
+      const sp=dt*1000/c.ms;
+      if(S.fade<c.a)S.fade=Math.min(c.a,S.fade+sp);else S.fade=Math.max(c.a,S.fade-sp);
+      if(S.fade===c.a)advance();
+      break;}
+    case 'walk':{
+      const e=c.e;
+      if(!e.mv){
+        if(c.i>=c.path.length){advance();break;}
+        const [x,y]=c.path[c.i++];
+        for(let d=0;d<4;d++)if(e.x+DX[d]===x&&e.y+DY[d]===y)stepEnt(e,d);
+      }
+      break;}
+    case 'excl':c.left-=dt;if(c.left<=0){c.e.excl=false;advance();}break;
+    default:if(updExtra)updExtra(dt,c);
+  }
+}
+
+// ----- movement -----
+function stepEnt(e,d){e.dir=d;e.x+=DX[d];e.y+=DY[d];e.ox=-DX[d]*TS;e.oy=-DY[d]*TS;e.mv=true;if(e===P)G.steps++;}
+function tileSolid(x,y){return x<0||y<0||x>=M.w||y>=M.h||SOLID.has(M.t[y][x]);}
+function walkable(x,y,self){
+  if(tileSolid(x,y))return false;
+  if(self!==P&&P.x===x&&P.y===y)return false;
+  for(const e of M.ents)if(e!==self&&e.solid&&e.x===x&&e.y===y&&(!e.vis||e.vis()))return false;
+  return true;
+}
+function entsMove(dt){
+  let arrived=false;
+  for(const e of [P,...M.ents]){
+    if(!e.mv)continue;
+    const sp=TS*(e===P?5.4:4.6)*dt;
+    e.ox=e.ox>0?Math.max(0,e.ox-sp):Math.min(0,e.ox+sp);
+    e.oy=e.oy>0?Math.max(0,e.oy-sp):Math.min(0,e.oy+sp);
+    if(e.ox===0&&e.oy===0){e.mv=false;if(e===P)arrived=true;}
+  }
+  return arrived;
+}
+function pathTo(e,tx,ty){
+  const q=[[e.x,e.y]],prev={},key=(x,y)=>x+','+y;prev[key(e.x,e.y)]=null;
+  while(q.length){
+    const [x,y]=q.shift();if(x===tx&&y===ty)break;
+    for(let d=0;d<4;d++){
+      const nx=x+DX[d],ny=y+DY[d],k=key(nx,ny);
+      if(k in prev)continue;
+      if(!(nx===tx&&ny===ty)&&!walkable(nx,ny,e))continue;
+      if(tileSolid(nx,ny))continue;
+      prev[k]=[x,y];q.push([nx,ny]);
+    }
+  }
+  if(!(key(tx,ty) in prev))return[];
+  const out=[];let k=key(tx,ty);
+  while(prev[k]){const [x,y]=k.split(',').map(Number);out.unshift([x,y]);k=key(...prev[k]);}
+  return out;
+}
+function approach(e){const p=pathTo(e,P.x,P.y);p.pop();return{t:'walk',e,path:p};}
+const excl=e=>({t:'excl',e});
+const walkTo=(e,x,y)=>({t:'walk',e,path:pathTo(e,x,y)});
+
+function canSee(e){
+  for(let k=1;k<=(e.sight||4);k++){
+    const x=e.x+DX[e.dir]*k,y=e.y+DY[e.dir]*k;
+    if(tileSolid(x,y))return false;
+    if(x===P.x&&y===P.y)return true;
+    if(M.ents.some(o=>o!==e&&o.solid&&o.x===x&&o.y===y&&(!o.vis||o.vis())))return false;
+  }
+  return false;
+}
+
+function setMap(id,x,y,dir){
+  G.map=id;M=MAPS[id];P.x=x;P.y=y;if(dir!=null)P.dir=dir;P.mv=false;P.ox=P.oy=0;
+  S.area={text:M.name,t:2.4};
+}
+function* goto(id,x,y,dir){
+  yield fade(1,250);setMap(id,x,y,dir);yield fade(0,250);
+  if(M.enter)yield* M.enter();
+}
+
+function interact(){
+  const fx=P.x+DX[P.dir],fy=P.y+DY[P.dir];
+  const e=M.ents.find(o=>o.x===fx&&o.y===fy&&(!o.vis||o.vis())&&o.talk);
+  if(e){if(e.kind==='npc')e.dir=(P.dir+2)%4;startScript(function*(){yield* e.talk(e);});return;}
+  const lk=M.look[fx+','+fy];
+  if(lk)startScript(lk);
+}
+
+function arrive(){
+  S.wc++;
+  const d=M.doors.find(d=>d.x===P.x&&d.y===P.y);
+  if(d){startScript(function*(){yield* goto(d.to,d.tx,d.ty,d.dir);});return;}
+  for(const tr of M.trig){
+    if(tr.at.some(p=>p[0]===P.x&&p[1]===P.y)&&!(tr.flag&&F[tr.flag])&&(!tr.when||tr.when())){
+      if(tr.flag)F[tr.flag]=1;startScript(tr.run);return;
+    }
+  }
+  for(const e of M.ents){
+    if(e.trainer&&(!e.vis||e.vis())&&!F['t_'+e.trainer.id]&&canSee(e)){startScript(function*(){yield* trainerFight(e,true);});return;}
+  }
+  const ch=M.t[P.y][P.x];
+  if((ch==='G'||ch==='m')&&M.enc&&Math.random()<.13){startScript(wildEncounter);return;}
+  if(stage()>=1&&S.wc>=24){S.wc=0;S.whisper={text:PK(WHISPERS[Math.min(stage(),5)]),t:3.4};}
+}
+function rollWild(){
+  const tot=M.enc.reduce((a,e)=>a+e.w,0);let r=Math.random()*tot;
+  for(const e of M.enc){r-=e.w;if(r<=0)return{sp:e.sp,lv:RI(e.lv[0],e.lv[1])};}
+  return{sp:M.enc[0].sp,lv:M.enc[0].lv[0]};
+}
+function* wildEncounter(){const r=yield* doBattle({kind:'wild',team:[rollWild()],bg:M.bg});yield* afterBattle(r);}
+function* afterBattle(r){if(r==='lose')yield* blackout();}
+function* blackout(){
+  yield fade(1,500);
+  G.money=Math.floor(G.money/2);healAll();
+  const h=G.lastHeal;setMap(h.map,h.x,h.y,2);
+  yield fade(0,600);
+  if(stage()<2)yield say("Everything went dark.","You wake up where it is warm. Someone has healed your Wilds.");
+  else{
+    yield say("Everything went dark.","You wake up somewhere warm. You don't remember walking here.","Your hands are muddy. There is something under your nails that isn't mud.");
+    note('blackout',"I blacked out and woke up somewhere else, hands dirty. I never remember the walk back.");
+  }
+}
+
+// ----- world update/draw -----
+function updWorld(dt){
+  if(entsMove(dt)&&!gen)arrive();
+  if(gen){updCmd(dt);return;}
+  if(S.menu){updMenu();return;}
+  if(!P.mv){
+    if(isB()||hit.has('m')){openMenu();return;}
+    if(isA()){interact();return;}
+    const d=heldDir();
+    if(d>=0){P.dir=d;if(walkable(P.x+DX[d],P.y+DY[d],P))stepEnt(P,d);}
+  }
+}
+function cam(){
+  const px=P.x*TS+P.ox+TS/2,py=P.y*TS+P.oy+TS/2,mw=M.w*TS,mh=M.h*TS;
+  let cx=px-W/2,cy=py-H/2;
+  cx=mw<=W?-(W-mw)/2:cl(cx,0,mw-W);cy=mh<=H?-(H-mh)/2:cl(cy,0,mh-H);
+  return[Math.round(cx),Math.round(cy)];
+}
+function drawWorld(){
+  g.fillStyle='#000';g.fillRect(0,0,W,H);
+  let [cx,cy]=cam();if(S.shakeT>0){cx+=RI(-4,4);cy+=RI(-4,4);}
+  const x0=Math.max(0,Math.floor(cx/TS)),x1=Math.min(M.w-1,Math.floor((cx+W)/TS)),y0=Math.max(0,Math.floor(cy/TS)),y1=Math.min(M.h-1,Math.floor((cy+H)/TS));
+  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++)drawTile(M,M.t[y][x],x,y,x*TS-cx,y*TS-cy);
+  const list=[];
+  for(const e of M.ents){if(e.vis&&!e.vis())continue;list.push({y:e.y*TS+e.oy,f:()=>drawEnt(e,e.x*TS+e.ox-cx,e.y*TS+e.oy-cy)});}
+  list.push({y:P.y*TS+P.oy,f:()=>{
+    const sx=P.x*TS+P.ox-cx,sy=P.y*TS+P.oy-cy;playerShadow(sx,sy);
+    human(sx,sy,P.dir,{col:'#3a5ea8',glove:'#3a3a44',hair:'#2a1a1a',mask:G.mask,eyes:stage()>=3?'#ffe070':null},P.mv);
+  }});
+  list.sort((a,b)=>a.y-b.y);for(const o of list)o.f();
+  const tint=M.tint&&M.tint();if(tint){g.fillStyle=tint;g.fillRect(0,0,W,H);}
+  const v=g.createRadialGradient(W/2,H/2,H*.3,W/2,H/2,W*.7);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,`rgba(0,0,0,${.35+stage()*.08})`);
+  g.fillStyle=v;g.fillRect(0,0,W,H);
+  if(S.area&&S.area.t>0){const a=Math.min(1,S.area.t);g.globalAlpha=a;box(16,14,Math.max(160,S.area.text.length*14+40),40);text(S.area.text,34,24,20);g.globalAlpha=1;}
+  if(S.toast&&S.toast.t>0){g.globalAlpha=Math.min(1,S.toast.t);box(W-250,14,236,36);text('✎ '+S.toast.text,W-236,23,16,'#e8c660');g.globalAlpha=1;}
+  if(S.whisper&&S.whisper.t>0&&!cur){g.globalAlpha=Math.min(.7,S.whisper.t/2);text(S.whisper.text,W/2,H-60,18,'#b0a0c8','center',false,true);g.globalAlpha=1;}
+}
+
+// ----- command overlays -----
+function drawCmd(){
+  const c=cur;if(!c)return;
+  switch(c.t){
+    case 'say':{
+      const L=c.L[c.i];box(24,420,752,140);
+      if(L.who){box(40,396,Math.max(110,L.who.length*13+30),32,'rgba(40,30,60,.97)');text(L.who,52,402,17,'#e8c660',undefined,true);}
+      let rem=Math.floor(c.ch);
+      L.w.forEach((ln,i)=>{const s=ln.slice(0,Math.max(0,rem));rem-=ln.length+1;text(s,48,440+i*27,20);});
+      if(c.ch>=L.txt.length&&Math.floor(S.t*2)%2)text('▼',740,530,16,'#e8c660');
+      break;}
+    case 'cut':{
+      g.fillStyle='#000';g.fillRect(0,0,W,H);
+      const L=c.L[c.i];g.globalAlpha=Math.min(1,c.ch*1.2);
+      const y0=H/2-L.w.length*17;
+      L.w.forEach((ln,i)=>text(ln,W/2,y0+i*34,24,'#d8d0e8','center',false,true));
+      g.globalAlpha=1;if(c.ch>.8&&Math.floor(S.t*2)%2)text(c.i===0?'Press Z or Enter  ▼':'▼',W/2,H-60,16,'#8a80a0','center');
+      break;}
+    case 'choice':{
+      if(c.q){box(24,420,752,140);const lines=wrap(c.q.replace(/\{n\}/g,G.name),690,FONT(20));lines.forEach((ln,i)=>text(ln,48,440+i*27,20));}
+      g.font=FONT(20);let w=0;for(const o of c.opts)w=Math.max(w,g.measureText(o).width);
+      const bw=w+70,bh=c.opts.length*34+30,bx=W-bw-30,by=410-bh;
+      box(bx,by,bw,bh);
+      c.opts.forEach((o,i)=>{text(o,bx+46,by+18+i*34,20,i===c.sel?'#e8c660':'#f0ead8');if(i===c.sel)text('▶',bx+20,by+18+i*34,20,'#e8c660');});
+      break;}
+    case 'name':{
+      g.fillStyle='#000';g.fillRect(0,0,W,H);
+      text('What is your name?',W/2,200,30,'#d8d0e8','center',false,true);
+      box(W/2-180,260,360,64);
+      text(c.buf+(Math.floor(S.t*2)%2?'_':' '),W/2,278,30,'#f0ead8','center');
+      text('Type, then press Enter',W/2,350,16,'#8a80a0','center');
+      break;}
+    default:if(drawExtra)drawExtra(c);
+  }
+}
+// ===== BATTLE =====
+function catchLines(name){
+  const st=stage();
+  return [
+    [`Gotcha! ${name} was caged!`],
+    [`The Cage clicks shut. ${name} didn't struggle.`,`You feel warm. Fuller. For a moment.`],
+    [`The Cage snaps shut around ${name}.`,`It stares at you through the bars. Not afraid anymore. Just very tired.`,`Something inside you settles, like a meal.`],
+    [`${name} is caged.`,`You didn't feel the cage close. You felt yourself close.`,`You are less hungry now. You hate that you are less hungry.`],
+    [`${name} is caged. As the door shut, it whispered: "forgive."`],
+    [`${name} is caged. It does not look at you. Neither of you pretends anymore.`]
+  ][Math.min(st,5)];
+}
+function* doBattle(o){
+  const wild=o.kind==='wild';
+  const foes=o.team.map(t=>mkMon(t.sp,t.lv));
+  const first=G.party.findIndex(m=>m.hp>0);
+  if(first<0)return 'lose';
+  const B=S.b={wild,foes,fi:0,foe:foes[0],me:G.party[first],bg:o.bg||'grass',trainer:o.trainer||null,
+    foeShake:0,meShake:0,foeDead:0,meDead:0,cage:null,ui:null};
+  G.party.forEach(m=>{m.st={atk:0,def:0};});
+  yield fade(1,300);S.mode='battle';yield fade(0,300);
+  G.seen[B.foe.sp]=1;
+  const nm=m=>m===B.me?m.name:(wild?'Wild ':'Foe ')+m.name;
+  const st=stage();
+  if(wild){
+    yield bm(`A wild ${B.foe.name} appeared!`);
+    if(st>=1&&Math.random()<.3+st*.1){
+      yield bm(PK(FEAR[Math.min(st,5)]).replace('{n}',B.foe.name));
+      if(st>=3)note('wildfear',"The wild ones don't run from me. They kneel. They go still. Like they know.");
+      else note('wildfreeze',"Wild creatures freeze when I get close. They don't even try to flee.");
+    }
+  }else{
+    yield bm(`${B.trainer.name} wants to battle!`);
+    yield bm(`${B.trainer.name} sent out ${B.foe.name}!`);
+  }
+  yield bm(`Go, ${B.me.name}!`);
+
+  function pickFoeMove(){
+    const ms=B.foe.moves.map(k=>MV[k]);
+    const w=ms.map(m=>m.pow?m.pow*eff(m.type,SP[B.me.sp].type)*(SP[B.foe.sp].type===m.type?1.3:1):18);
+    let t=w.reduce((a,b)=>a+b,0),r=Math.random()*t;
+    for(let i=0;i<ms.length;i++){r-=w[i];if(r<=0)return ms[i];}
+    return ms[0];
+  }
+  function* strike(att,def,mv){
+    yield bm(`${nm(att)} used ${mv.name}!`);
+    if(Math.random()*100>mv.acc){yield bm('It missed!');return;}
+    if(mv.pow>0){
+      const e=eff(mv.type,SP[def.sp].type),d=calcDmg(att,def,mv);
+      def.hp=Math.max(0,def.hp-d);
+      if(def===B.foe)B.foeShake=1;else B.meShake=1;
+      sfx(110,.14,'sawtooth',.04);
+      yield bwait(500);
+      if(e>1)yield bm("It's super effective!");else if(e<1)yield bm("It's not very effective...");
+    }else if(mv.eff==='atkdown'){def.st.atk=Math.max(-3,def.st.atk-1);yield bm(`${nm(def)}'s attack fell!`);}
+    else if(mv.eff==='defup'){att.st.def=Math.min(3,att.st.def+1);yield bm(`${nm(att)}'s defense rose!`);}
+    else if(mv.eff==='heal'){att.hp=Math.min(att.mhp,att.hp+Math.floor(att.mhp*.4));yield bm(`${nm(att)} recovered health!`);}
+  }
+  function* foeFaint(){
+    B.foeDead=.01;yield bwait(700);yield bm(`${nm(B.foe)} fainted!`);
+    const base=Math.floor(SP[B.foe.sp].exp*B.foe.lv/4*(wild?1:1.5));
+    for(const m of G.party){
+      if(m.hp<=0)continue;
+      const amt=m===B.me?base:Math.max(1,Math.floor(base/2));
+      const msgs=gainExp(m,amt);
+      if(m===B.me){yield bm(`${m.name} gained ${amt} exp.`);for(const t of msgs)yield bm(t);}
+      else for(const t of msgs)if(t.includes('grew'))yield bm(t);
+    }
+    if(B.fi+1<B.foes.length){
+      B.fi++;B.foe=B.foes[B.fi];B.foeDead=0;G.seen[B.foe.sp]=1;
+      yield bm(`${B.trainer.name} sent out ${B.foe.name}!`);return 'next';
+    }
+    return 'win';
+  }
+  function* meFaint(){
+    B.meDead=.01;yield bwait(700);yield bm(`${B.me.name} fainted!`);
+    if(!G.party.some(m=>m.hp>0))return 'lose';
+    let idx=-1;
+    while(idx<0)idx=yield {t:'bparty',mode:'swap',forced:true};
+    B.me=G.party[idx];B.me.st={atk:0,def:0};B.meDead=0;
+    yield bm(`Go, ${B.me.name}!`);return 'ok';
+  }
+  const frozen=()=>wild&&st>=2&&Math.random()<.12+.06*(Math.min(st,5)-2);
+
+  let result=null;
+  loop:while(true){
+    const act=yield {t:'bmenu'};
+    let meMove=null;
+    if(act.k==='run'){
+      if(Math.random()<.75){yield bm('Got away safely!');result='ran';break;}
+      yield bm("Couldn't get away!");
+    }else if(act.k==='spare'){
+      G.mercy++;G.spared++;
+      if(st<2)yield bm(`You step back. The wild ${B.foe.name} blinks, then scampers off.`);
+      else{yield bm(`You lower your hands. The wild ${B.foe.name} stares at you for a long moment...`);yield bm('Then it bows, and goes.');}
+      note('spare',"I let a wild one go. It looked at me like I'd done something impossible.");
+      result='spared';break;
+    }else if(act.k==='salve'){
+      const idx=yield {t:'bparty',mode:'salve'};
+      if(idx<0)continue;
+      const m=G.party[idx];
+      if(m.hp<=0||m.hp>=m.mhp){yield bm("It won't have any effect.");continue;}
+      G.bag.salve--;m.hp=Math.min(m.mhp,m.hp+40);yield bm(`${m.name} was patched up.`);
+    }else if(act.k==='party'){
+      const idx=yield {t:'bparty',mode:'swap'};
+      if(idx<0||G.party[idx]===B.me)continue;
+      B.me=G.party[idx];B.me.st={atk:0,def:0};yield bm(`Go, ${B.me.name}!`);
+    }else if(act.k==='cage'){
+      const iron=act.ball==='iron';
+      if(iron)G.bag.iron--;else G.bag.cage--;
+      yield bm(`You threw the ${iron?'Iron Cage':'Cage'}!`);
+      B.cage={state:'fly',t:0,wob:0};yield bwait(800);B.cage.state='shut';
+      const ratio=B.foe.hp/B.foe.mhp;
+      const p=cl(SP[B.foe.sp].catch*(1.7-1.4*ratio)*(iron?1.7:1),.04,.97),q=Math.pow(p,1/3);
+      let n=0;
+      for(let i=0;i<3;i++){B.cage.wob=1;sfx(200,.1,'triangle',.05);yield bwait(750);if(Math.random()<q)n++;else break;}
+      if(n===3){
+        const m=B.foe;G.caught[m.sp]=1;G.hunted++;m.st={atk:0,def:0};
+        for(const l of catchLines(m.name))yield bm(l);
+        if(G.party.length<6)G.party.push(m);else{G.box.push(m);yield bm(`${m.name} was sent to storage.`);}
+        if(G.hunted===1)note('firstcage',"My first cage. It felt good. Why did it feel so good?");
+        if(st>=2)note('caged',"When the cage closes, something in me is satisfied. Not happy. Fed.");
+        result='caught';break loop;
+      }
+      B.cage=null;
+      yield bm(st>=2?`${B.foe.name} slipped the Cage. For a second it looked relieved.`:`Oh no! ${B.foe.name} broke free!`);
+    }else if(act.k==='move'){meMove=MV[B.me.moves[act.i]];}
+
+    const steps=meMove?(B.me.spd>=B.foe.spd?['me','foe']:['foe','me']):['foe'];
+    for(const s of steps){
+      if(B.me.hp<=0||B.foe.hp<=0)continue;
+      if(s==='me'){
+        yield* strike(B.me,B.foe,meMove);
+        if(B.foe.hp<=0){const r=yield* foeFaint();if(r==='win'){result='win';break loop;}break;}
+      }else{
+        if(frozen())yield bm(`${nm(B.foe)} is too afraid to move!`);
+        else yield* strike(B.foe,B.me,pickFoeMove());
+        if(B.me.hp<=0){const r=yield* meFaint();if(r==='lose'){result='lose';break loop;}break;}
+      }
+    }
+  }
+  yield fade(1,300);S.mode='world';S.b=null;yield fade(0,300);
+  return result;
+}
+
+// ----- battle UI / commands -----
+function mainOpts(){
+  const B=S.b,o=[{id:'fight',l:'FIGHT'}];
+  if(B.wild){o.push({id:'cage',l:`CAGE x${G.bag.cage}`});if(G.bag.iron>0)o.push({id:'iron',l:`IRON x${G.bag.iron}`});}
+  o.push({id:'salve',l:`SALVE x${G.bag.salve}`},{id:'party',l:'PARTY'});
+  if(B.wild)o.push({id:'spare',l:'SPARE'},{id:'run',l:'RUN'});
+  return o;
+}
+function initExtra(c){
+  switch(c.t){
+    case 'bmsg':c.ch=0;c.hold=0;c.txt=c.text.replace(/\{n\}/g,G.name);break;
+    case 'bwait':c.left=c.ms/1000;break;
+    case 'bmenu':S.b.ui={k:'main',sel:0,opts:mainOpts()};break;
+    case 'bparty':c.sel=Math.max(0,G.party.indexOf(S.b.me));if(G.party[c.sel].hp<=0){const a=G.party.findIndex(m=>m.hp>0);if(a>=0)c.sel=a;}break;
+    case 'shop':initShop(c);break;
+  }
+}
+function navGrid(sel,n,cols){
+  if(isU())sel=sel-cols>=0?sel-cols:sel;
+  if(isD())sel=sel+cols<n?sel+cols:sel;
+  if(isL())sel=sel%cols>0?sel-1:sel;
+  if(isRt())sel=(sel%cols<cols-1&&sel+1<n)?sel+1:sel;
+  return sel;
+}
+function updExtra(dt,c){
+  const B=S.b;
+  switch(c.t){
+    case 'bmsg':{
+      const n=c.txt.length;c.ch=Math.min(n,c.ch+dt*70);
+      if(c.ch>=n)c.hold+=dt;
+      if(isA()){if(c.ch<n)c.ch=n;else c.hold=99;}
+      if(c.hold>.65)advance();
+      break;}
+    case 'bwait':c.left-=dt;if(c.left<=0)advance();break;
+    case 'bmenu':{
+      const u=B.ui;
+      if(u.k==='main'){
+        u.sel=navGrid(u.sel,u.opts.length,2);
+        if(isA()){
+          const o=u.opts[u.sel];sfx(520,.04);
+          if(o.id==='fight'){B.ui={k:'moves',sel:0};}
+          else if(o.id==='cage'||o.id==='iron'){
+            const have=o.id==='cage'?G.bag.cage:G.bag.iron;
+            if(have>0)advance({k:'cage',ball:o.id});else sfx(120,.1);
+          }else if(o.id==='salve'){if(G.bag.salve>0)advance({k:'salve'});else sfx(120,.1);}
+          else advance({k:o.id});
+        }
+      }else{
+        u.sel=navGrid(u.sel,B.me.moves.length,2);
+        if(isB()){B.ui={k:'main',sel:0,opts:mainOpts()};}
+        else if(isA()){sfx(520,.04);advance({k:'move',i:u.sel});}
+      }
+      break;}
+    case 'bparty':{
+      if(isU())c.sel=(c.sel+G.party.length-1)%G.party.length;
+      if(isD())c.sel=(c.sel+1)%G.party.length;
+      if(isB()&&!c.forced)advance(-1);
+      else if(isA()){
+        const m=G.party[c.sel];
+        if(c.mode==='swap'&&m.hp<=0){sfx(120,.1);break;}
+        advance(c.sel);
+      }
+      break;}
+    case 'shop':updShop(dt,c);break;
+  }
+}
+function updBattleAnim(dt){
+  const B=S.b;if(!B)return;
+  B.foeShake=Math.max(0,B.foeShake-dt*3);B.meShake=Math.max(0,B.meShake-dt*3);
+  if(B.foeDead>0)B.foeDead=Math.min(1,B.foeDead+dt*1.5);
+  if(B.meDead>0)B.meDead=Math.min(1,B.meDead+dt*1.5);
+  if(B.cage){B.cage.t+=dt;B.cage.wob=Math.max(0,B.cage.wob-dt*1.6);}
+  for(const m of [B.foe,B.me]){if(m.dh===undefined)m.dh=m.hp;m.dh+=(m.hp-m.dh)*Math.min(1,dt*6);if(Math.abs(m.hp-m.dh)<.3)m.dh=m.hp;}
+}
+
+function drawBattle(){
+  const B=S.b;if(!B)return;
+  const sets={grass:['#a8d4f0','#5a9a46'],marsh:['#7a9a9a','#3f6a56'],indoor:['#3a3048','#2a2036'],tower:['#1a1a30','#2a2a44']};
+  const [a,b]=sets[B.bg]||sets.grass;
+  const gr=g.createLinearGradient(0,0,0,410);gr.addColorStop(0,a);gr.addColorStop(.55,a);gr.addColorStop(.56,b);gr.addColorStop(1,b);
+  g.fillStyle=gr;g.fillRect(0,0,W,410);
+  ell(590,235,130,26,'rgba(0,0,0,.18)');ell(210,370,150,30,'rgba(0,0,0,.2)');
+  const st=stage();
+  // foe
+  const cg=B.cage;
+  if(!(cg&&cg.state==='shut')){
+    const shrink=cg&&cg.state==='fly'?cl((cg.t-.55)/.25,0,1):0;
+    drawMon(B.foe.sp,590,170,190,{flip:true,shake:B.foeShake*Math.sin(S.t*60)*6,fear:B.wild&&st>=1,dead:B.foeDead,shrink});
+  }
+  if(cg){
+    let x=590,y=215;
+    if(cg.state==='fly'){const k=cl(cg.t/.75,0,1);x=210+(590-210)*k;y=330+(215-330)*k-Math.sin(k*Math.PI)*120;}
+    else y=215+Math.sin(S.t*40)*cg.wob*4;
+    if(cg.state==='shut')x+=Math.sin(S.t*30)*cg.wob*6;
+    g.fillStyle='#3a3a4a';g.fillRect(x-22,y-30,44,44);g.strokeStyle='#caa050';g.lineWidth=3;
+    for(let i=-1;i<=1;i++){g.beginPath();g.moveTo(x+i*12,y-30);g.lineTo(x+i*12,y+14);g.stroke();}
+    g.strokeRect(x-22,y-30,44,44);
+  }
+  // me
+  drawMon(B.me.sp,210,285,210,{shake:B.meShake*Math.sin(S.t*60)*6,dead:B.meDead});
+  // panels
+  panel(40,36,330,B.foe,false);
+  panel(430,296,330,B.me,true);
+  if(B.trainer)text(B.trainer.name,52,16,14,'#fff','left',true);
+  // bottom
+  box(24,420,752,140);
+}
+function panel(x,y,w,m,mine){
+  box(x,y,w,84,'rgba(12,9,20,.9)');
+  text(m.name,x+16,y+12,20,'#f0ead8',undefined,true);
+  text('Lv'+m.lv,x+w-70,y+14,16,'#d8d0e8');
+  const t=SP[m.sp].type;g.fillStyle=TCOL[t];g.fillRect(x+16,y+38,10,10);text(t,x+30,y+36,12,'#a8a0b8');
+  text('HP',x+16,y+58,14,'#e8c660',undefined,true);
+  const bx=x+46,bw=w-70,f=cl((m.dh===undefined?m.hp:m.dh)/m.mhp,0,1);
+  g.fillStyle='#1a1226';g.fillRect(bx,y+58,bw,12);
+  g.fillStyle=f>.5?'#58b04a':f>.2?'#e8c820':'#d83a3a';g.fillRect(bx,y+58,bw*f,12);
+  g.strokeStyle='#8a80a0';g.lineWidth=1;g.strokeRect(bx+.5,y+58.5,bw,12);
+  if(mine)text(`${Math.ceil(m.hp)}/${m.mhp}`,x+w-16,y+36,14,'#d8d0e8','right');
+}
+function drawExtra(c){
+  const B=S.b;
+  switch(c.t){
+    case 'bmsg':{
+      const lines=wrap(c.txt,690,FONT(20));let rem=Math.floor(c.ch);
+      lines.forEach((ln,i)=>{text(ln.slice(0,Math.max(0,rem)),48,440+i*27,20);rem-=ln.length+1;});
+      break;}
+    case 'bwait':break;
+    case 'bmenu':{
+      const u=B.ui;
+      text(u.k==='main'?`What will ${B.me.name} do?`:'Choose a move.',48,440,20);
+      box(400,420,376,140);
+      if(u.k==='main'){
+        u.opts.forEach((o,i)=>{const x=430+(i%2)*170,y=442+Math.floor(i/2)*29;
+          text(o.l,x+22,y,18,i===u.sel?'#e8c660':'#f0ead8');if(i===u.sel)text('▶',x,y,18,'#e8c660');});
+      }else{
+        B.me.moves.forEach((k,i)=>{const mv=MV[k],x=420+(i%2)*180,y=446+Math.floor(i/2)*50;
+          text(mv.name,x+20,y,16,i===u.sel?'#e8c660':'#f0ead8');if(i===u.sel)text('▶',x,y,16,'#e8c660');
+          g.fillStyle=TCOL[mv.type];g.fillRect(x+20,y+22,8,8);text(mv.pow?'PWR '+mv.pow:'STATUS',x+32,y+20,12,'#a8a0b8');});
+      }
+      break;}
+    case 'bparty':{
+      box(60,40,420,360);text(c.mode==='salve'?'Use Salve on...':'Choose a Wild',84,56,20,'#e8c660',undefined,true);
+      G.party.forEach((m,i)=>{
+        const y=96+i*48;
+        text((i===c.sel?'▶ ':'  ')+m.name+'  Lv'+m.lv,84,y,18,m.hp<=0?'#7a7088':i===c.sel?'#e8c660':'#f0ead8');
+        g.fillStyle='#1a1226';g.fillRect(84,y+24,220,8);g.fillStyle='#58b04a';g.fillRect(84,y+24,220*cl(m.hp/m.mhp,0,1),8);
+        text(`${m.hp}/${m.mhp}`,320,y+18,14,'#a8a0b8');
+      });
+      break;}
+    case 'shop':drawShop(c);break;
+  }
+}
+// ===== MENUS: pause menu, party, wildbook, bag, journal, shop, save =====
+const SAVEKEY='hollowhunt_v1';
+function saveGame(){try{G.x=P.x;G.y=P.y;G.dir=P.dir;localStorage.setItem(SAVEKEY,JSON.stringify(G));return true;}catch(e){return false;}}
+function loadSave(){try{const s=localStorage.getItem(SAVEKEY);return s?JSON.parse(s):null;}catch(e){return null;}}
+
+function openMenu(){S.menu={page:'main',sel:0,sub:null,scroll:0};sfx(440,.05);}
+const MAINMENU=['PARTY','WILDBOOK','BAG','BOX','JOURNAL','SAVE','CLOSE'];
+
+function updMenu(){
+  const m=S.menu;
+  switch(m.page){
+    case 'main':
+      if(isU())m.sel=(m.sel+MAINMENU.length-1)%MAINMENU.length;
+      if(isD())m.sel=(m.sel+1)%MAINMENU.length;
+      if(isB()||hit.has('m')){S.menu=null;break;}
+      if(isA()){
+        const o=MAINMENU[m.sel];sfx(520,.04);
+        if(o==='CLOSE')S.menu=null;
+        else if(o==='SAVE'){S.toast={text:saveGame()?'Game saved':'Save failed',t:2};}
+        else S.menu={page:o.toLowerCase(),sel:0,sub:null,scroll:0,from:m.sel};
+      }
+      break;
+    case 'party':updPartyMenu(m);break;
+    case 'box':updBoxMenu(m);break;
+    case 'wildbook':updDexMenu(m);break;
+    case 'bag':updBagMenu(m);break;
+    case 'journal':
+      if(isU())m.scroll=Math.max(0,m.scroll-1);
+      if(isD())m.scroll=Math.min(Math.max(0,G.notes.length-6),m.scroll+1);
+      if(isB())back(m);
+      break;
+  }
+}
+function back(m){S.menu={page:'main',sel:m.from||0,sub:null,scroll:0};}
+
+function updPartyMenu(m){
+  if(m.sub==='summary'){if(isA()||isB())m.sub=null;return;}
+  if(m.sub==='confirm'){
+    if(isL()||isRt()||isU()||isD())m.yes=!m.yes;
+    if(isB())m.sub=null;
+    if(isA()){
+      if(m.yes){const mon=G.party[m.sel];G.party.splice(m.sel,1);G.mercy++;G.spared++;m.sel=0;
+        S.toast={text:`${mon.name} was released`,t:2.4};
+        note('release',"I let one go. It didn't run. It stayed a moment, then it left, and I felt lighter and heavier at once.");}
+      m.sub=null;
+    }
+    return;
+  }
+  if(m.sub==='act'){
+    if(isU())m.act=(m.act+3)%4;if(isD())m.act=(m.act+1)%4;
+    if(isB())m.sub=null;
+    if(isA()){
+      sfx(520,.04);
+      if(m.act===0)m.sub='summary';
+      else if(m.act===1){const mon=G.party.splice(m.sel,1)[0];G.party.unshift(mon);m.sel=0;m.sub=null;}
+      else if(m.act===2){
+        if(G.party.length<=1){S.toast={text:"It won't leave you",t:2.4};m.sub=null;note('stay',"I tried to release my last partner. It wouldn't go. It just stared at me.");}
+        else{m.sub='confirm';m.yes=false;}
+      }else m.sub=null;
+    }
+    return;
+  }
+  if(isU())m.sel=(m.sel+G.party.length-1)%G.party.length;
+  if(isD())m.sel=(m.sel+1)%G.party.length;
+  if(isB())back(m);
+  if(isA()){m.sub='act';m.act=0;sfx(520,.04);}
+}
+function updBoxMenu(m){
+  if(!G.box.length){if(isA()||isB())back(m);return;}
+  if(isU())m.sel=(m.sel+G.box.length-1)%G.box.length;
+  if(isD())m.sel=(m.sel+1)%G.box.length;
+  if(isB())back(m);
+  if(isA()){
+    const mon=G.box.splice(m.sel,1)[0];
+    if(G.party.length<6)G.party.push(mon);else{const out=G.party.pop();G.box.push(out);G.party.push(mon);}
+    m.sel=0;sfx(520,.04);
+  }
+}
+function updDexMenu(m){
+  if(m.sub==='entry'){if(isA()||isB())m.sub=null;return;}
+  if(isU())m.sel=(m.sel+DEXORDER.length-1)%DEXORDER.length;
+  if(isD())m.sel=(m.sel+1)%DEXORDER.length;
+  if(isB())back(m);
+  if(isA()&&G.seen[DEXORDER[m.sel]])m.sub='entry';
+}
+function updBagMenu(m){
+  const items=bagItems();
+  if(m.sub==='pick'){
+    if(isU())m.t=(m.t+G.party.length-1)%G.party.length;
+    if(isD())m.t=(m.t+1)%G.party.length;
+    if(isB())m.sub=null;
+    if(isA()){const mon=G.party[m.t];
+      if(mon.hp>0&&mon.hp<mon.mhp){G.bag.salve--;mon.hp=Math.min(mon.mhp,mon.hp+40);sfx(660,.08);if(G.bag.salve<=0)m.sub=null;}
+      else sfx(120,.1);}
+    return;
+  }
+  if(isU())m.sel=(m.sel+items.length-1)%items.length;
+  if(isD())m.sel=(m.sel+1)%items.length;
+  if(isB())back(m);
+  if(isA()&&items[m.sel].id==='salve'&&G.bag.salve>0){m.sub='pick';m.t=0;}
+}
+const bagItems=()=>[
+  {id:'cage',n:'Cage',c:G.bag.cage,d:'Closes around a Wild. It hums faintly when it holds something.'},
+  {id:'iron',n:'Iron Cage',c:G.bag.iron,d:'Heavier. Holds tighter. You don\'t know why that comforts you.'},
+  {id:'salve',n:'Salve',c:G.bag.salve,d:'Restores 40 HP to one Wild.'}
+];
+
+function drawMenu(){
+  const m=S.menu;
+  g.fillStyle='rgba(0,0,0,.55)';g.fillRect(0,0,W,H);
+  if(m.page==='main'){
+    box(560,30,210,MAINMENU.length*38+36);
+    MAINMENU.forEach((o,i)=>{text(o,610,52+i*38,20,i===m.sel?'#e8c660':'#f0ead8');if(i===m.sel)text('▶',580,52+i*38,20,'#e8c660');});
+    box(30,30,240,110);text(G.name,50,48,22,'#e8c660',undefined,true);
+    text('¥'+G.money,50,80,18);text(`Caged: ${G.hunted}`,50,104,16,'#a8a0b8');
+    return;
+  }
+  box(40,30,720,516);
+  switch(m.page){
+    case 'party':{
+      text('PARTY',70,50,24,'#e8c660',undefined,true);
+      G.party.forEach((mon,i)=>{
+        const y=100+i*68;
+        if(i===m.sel){g.fillStyle='rgba(232,198,96,.12)';g.fillRect(60,y-6,400,62);}
+        drawMon(mon.sp,96,y+26,52,{});
+        text(mon.name+'  Lv'+mon.lv,150,y,20,mon.hp<=0?'#7a7088':'#f0ead8');
+        g.fillStyle='#1a1226';g.fillRect(150,y+28,200,10);g.fillStyle='#58b04a';g.fillRect(150,y+28,200*cl(mon.hp/mon.mhp,0,1),10);
+        text(`${mon.hp}/${mon.mhp}`,360,y+24,14,'#a8a0b8');
+      });
+      if(m.sub==='act'){box(500,100,220,170);['SUMMARY','MOVE FIRST','RELEASE','BACK'].forEach((o,i)=>{text(o,550,124+i*34,18,i===m.act?'#e8c660':'#f0ead8');if(i===m.act)text('▶',522,124+i*34,18,'#e8c660');});}
+      if(m.sub==='confirm'){box(200,230,400,130);text(`Release ${G.party[m.sel].name}?`,400,252,20,'#f0ead8','center');
+        text('It will leave and not come back.',400,282,14,'#a8a0b8','center');
+        text((m.yes?'▶ ':'  ')+'YES',300,318,20,m.yes?'#e8c660':'#f0ead8');text((!m.yes?'▶ ':'  ')+'NO',440,318,20,!m.yes?'#e8c660':'#f0ead8');}
+      if(m.sub==='summary'){
+        const mon=G.party[m.sel];box(120,70,560,440,'rgba(12,9,20,.98)');
+        drawMon(mon.sp,260,230,200,{fear:mon.hp>0&&stage()>=2});
+        text(mon.name+'  Lv'+mon.lv,400,100,24,'#e8c660',undefined,true);text(SP[mon.sp].type.toUpperCase(),400,134,16,TCOL[SP[mon.sp].type]);
+        text(`HP  ${mon.hp}/${mon.mhp}`,400,164,16);text(`ATK ${mon.atk}   DEF ${mon.def}   SPD ${mon.spd}`,400,188,16);
+        mon.moves.forEach((k,i)=>{text(MV[k].name,400,224+i*26,16);text(MV[k].pow?'PWR '+MV[k].pow:'-',600,224+i*26,14,'#a8a0b8');});
+        const d=SP[mon.sp].dex[stage()>=2?1:0];
+        wrap(d,500,FONT(16)).forEach((ln,i)=>text(ln,150,360+i*24,16,'#d8d0e8'));
+      }
+      break;}
+    case 'box':
+      text('CAGE STORAGE',70,50,24,'#e8c660',undefined,true);
+      if(!G.box.length)text('Empty. Press Z to go back.',70,100,18,'#a8a0b8');
+      G.box.forEach((mon,i)=>{text((i===m.sel?'▶ ':'  ')+mon.name+'  Lv'+mon.lv,70,100+i*30,18,i===m.sel?'#e8c660':'#f0ead8');});
+      if(G.box.length)text('Z: bring into party',70,500,14,'#a8a0b8');
+      break;
+    case 'wildbook':{
+      text('WILDBOOK',70,50,24,'#e8c660',undefined,true);
+      const per=14,top=Math.max(0,Math.min(m.sel-6,DEXORDER.length-per));
+      DEXORDER.slice(top,top+per).forEach((id,j)=>{const i=top+j,y=96+j*30,sn=G.seen[id],cg=G.caught[id];
+        text(`${(i+1+'').padStart(3,'0')}  ${sn?SP[id].name:'??????'}`,90,y,18,i===m.sel?'#e8c660':sn?'#f0ead8':'#6a6078');
+        if(i===m.sel)text('▶',68,y,18,'#e8c660');
+        if(cg){g.fillStyle='#e8c660';g.fillRect(290,y+5,10,10);}});
+      text(`Seen ${Object.keys(G.seen).length}  Caged ${Object.keys(G.caught).length}`,70,510,14,'#a8a0b8');
+      if(F.finale)text('#000  ???  —  ENTRY UPDATED',420,510,14,'#d83a3a');
+      if(m.sub==='entry'){
+        const id=DEXORDER[m.sel];box(120,70,560,440,'rgba(12,9,20,.98)');
+        drawMon(id,260,230,200,{fear:stage()>=2});
+        text(SP[id].name,400,100,24,'#e8c660',undefined,true);text(SP[id].type.toUpperCase(),400,134,16,TCOL[SP[id].type]);
+        wrap(SP[id].dex[stage()>=2?1:0],500,FONT(18)).forEach((ln,i)=>text(ln,150,360+i*26,18,'#d8d0e8'));
+      }
+      break;}
+    case 'bag':{
+      text('BAG',70,50,24,'#e8c660',undefined,true);
+      const items=bagItems();
+      items.forEach((it,i)=>{text((i===m.sel?'▶ ':'  ')+it.n+'  x'+it.c,70,100+i*34,20,i===m.sel?'#e8c660':'#f0ead8');});
+      text(items[m.sel].d,70,230,16,'#d8d0e8');
+      if(m.sub==='pick'){box(380,90,340,360);G.party.forEach((mon,i)=>{text((i===m.t?'▶ ':'  ')+mon.name+'  '+mon.hp+'/'+mon.mhp,404,118+i*40,18,i===m.t?'#e8c660':'#f0ead8');});}
+      break;}
+    case 'journal':{
+      text('JOURNAL',70,50,24,'#e8c660',undefined,true);
+      text(`${G.notes.length} entries — things you noticed`,70,84,14,'#a8a0b8');
+      if(!G.notes.length)text('Nothing yet.',70,120,18,'#6a6078');
+      let y=116;
+      G.notes.slice(m.scroll,m.scroll+6).forEach(n=>{wrap('• '+n.t,640,FONT(17)).forEach(ln=>{text(ln,70,y,17,'#d8d0e8');y+=24;});y+=12;});
+      break;}
+  }
+}
+
+// ----- shop -----
+function initShop(c){c.sel=0;c.msg='';}
+function shopItems(c){return c.stock;}
+function updShop(dt,c){
+  if(isU())c.sel=(c.sel+c.stock.length-1)%c.stock.length;
+  if(isD())c.sel=(c.sel+1)%c.stock.length;
+  if(isB()){advance();return;}
+  if(isA()){
+    const it=c.stock[c.sel];
+    if(G.money>=it.p){G.money-=it.p;G.bag[it.id]++;c.msg=`Bought ${it.n}.`;sfx(660,.08);}else{c.msg="Not enough ¥.";sfx(120,.1);}
+  }
+}
+function drawShop(c){
+  box(40,40,460,300);text('SHOP',70,58,24,'#e8c660',undefined,true);
+  c.stock.forEach((it,i)=>{text((i===c.sel?'▶ ':'  ')+it.n,70,110+i*36,20,i===c.sel?'#e8c660':'#f0ead8');text('¥'+it.p,400,110+i*36,20,'#e8c660','right');text('(have '+G.bag[it.id]+')',420,114+i*36,13,'#a8a0b8');});
+  text(c.stock[c.sel].d,70,260,15,'#d8d0e8');
+  text(c.msg,70,296,16,'#9fe0a0');
+  box(520,40,240,70);text('¥'+G.money,640,64,24,'#e8c660','center');
+  box(24,420,752,140);text('Z: buy    X: leave',48,440,18);
+}
+// ===== MAPS =====
+function newMap(id,w,h,fill,o){
+  const m=Object.assign({id,w,h,t:[],ents:[],doors:[],trig:[],look:{},enc:null,name:id,interior:false,bg:'indoor'},o||{});
+  for(let y=0;y<h;y++)m.t.push(new Array(w).fill(fill));
+  MAPS[id]=m;return m;
+}
+const setT=(m,x,y,c)=>{if(x>=0&&y>=0&&x<m.w&&y<m.h)m.t[y][x]=c;};
+const rect=(m,x,y,w,h,c)=>{for(let j=0;j<h;j++)for(let i=0;i<w;i++)setT(m,x+i,y+j,c);};
+function building(m,x,y,w,roof,door){
+  rect(m,x,y,w,2,roof);rect(m,x,y+2,w,2,'W');
+  if(w>=4){setT(m,x+1,y+2,'w');setT(m,x+w-2,y+2,'w');}
+  if(door!=null)setT(m,x+door,y+3,'D');
+}
+function scatter(m,seed,n,ch){const r=srng(seed);for(let i=0;i<n;i++){const x=Math.floor(r()*m.w),y=Math.floor(r()*m.h);if(m.t[y][x]==='g')m.t[y][x]=ch||'#';}}
+function room(id,w,h,name,exitTo,ex,ey,o){
+  const m=newMap(id,w,h,',',Object.assign({name,interior:true},o||{}));
+  rect(m,0,0,w,2,'X');rect(m,0,0,1,h,'X');rect(m,w-1,0,1,h,'X');rect(m,0,h-1,w,1,'X');
+  const dx=w>>1;setT(m,dx,h-1,'D');m.doors.push({x:dx,y:h-1,to:exitTo,tx:ex,ty:ey,dir:2});return m;
+}
+const door=(m,x,y,to,tx,ty,dir)=>m.doors.push({x,y,to,tx,ty,dir:dir||0});
+function npc(m,x,y,o){
+  const e=Object.assign({kind:'npc',x,y,ox:0,oy:0,dir:2,solid:true,col:'#6a7ac0',hair:'#3a2a20',mv:false},o);
+  m.ents.push(e);return e;
+}
+const byStage=(...a)=>()=>a[Math.min(stage(),a.length-1)];
+const lines=f=>function*(){yield say(...(typeof f==='function'?f():f));};
+const sign=(m,x,y,f)=>npc(m,x,y,{kind:'sign',talk:lines(f)});
+function pickup(m,x,y,key,item,n,label){
+  return npc(m,x,y,{kind:'item',vis:()=>!F[key],talk:function*(){F[key]=1;G.bag[item]+=n;sfx(700,.12);yield say(`You found ${label}!`);}});
+}
+function trainer(m,x,y,dir,t,o){
+  return npc(m,x,y,Object.assign({dir,sight:t.sight||4,trainer:t,talk:function*(e){yield* trainerFight(e,false);}},o||{}));
+}
+function clearUnder(m){for(const e of m.ents)if(m.t[e.y][e.x]==='#')m.t[e.y][e.x]='g';for(const tr of m.trig)for(const p of tr.at)if(m.t[p[1]][p[0]]==='#')m.t[p[1]][p[0]]='g';}
+function centerRoom(id,name,exitTo,ex,ey){
+  const m=room(id,10,8,name,exitTo,ex,ey);
+  rect(m,2,3,6,1,'K');setT(m,8,2,'H');
+  npc(m,4,3,{col:'#e88aa0',hair:'#e8d0d8',talk:centerTalk});
+  npc(m,2,5,{col:'#8a9a6a',talk:lines(byStage(["A woman waits on the bench, knitting. Her needles stop when you sit nearby."],["The woman on the bench has moved to the far end. She doesn't look up."]))});
+  return m;
+}
+function martRoom(id,name,exitTo,ex,ey,stock){
+  const m=room(id,10,8,name,exitTo,ex,ey);
+  rect(m,2,3,6,1,'K');rect(m,1,2,2,1,'b');rect(m,7,2,2,1,'b');
+  npc(m,4,3,{col:'#c8a050',talk:function*(){yield say("Clerk: Welcome!");yield {t:'shop',stock};yield say("Clerk: Come again!");}});
+  return m;
+}
+const STOCK_A=[{id:'cage',n:'Cage',p:80,d:'Closes around a Wild.'},{id:'salve',n:'Salve',p:60,d:'Restores 40 HP.'}];
+const STOCK_B=[{id:'cage',n:'Cage',p:80,d:'Closes around a Wild.'},{id:'iron',n:'Iron Cage',p:220,d:'Holds much tighter. It hums.'},{id:'salve',n:'Salve',p:60,d:'Restores 40 HP.'}];
+
+function buildMaps(){
+  let m;
+  // ---------- HOME ----------
+  m=room('home',10,8,'Home','ashmere',7,18);
+  rect(m,1,2,2,1,'B');setT(m,5,1,'M');rect(m,4,4,3,1,'T');rect(m,7,2,2,1,'K');
+  m.look['5,1']=function*(){
+    if(stage()<2)yield say("Your reflection looks back at you.","It blinks a moment after you do.","You decide you're tired.");
+    else yield say("Your reflection is already looking at you.","It was looking before you turned around.");
+    note('mirror',"My reflection blinks a little late. I think it's looking at something behind me.");
+  };
+  const plates=function*(){
+    yield say("Three bowls. Three chairs. Three spoons.","Two of you live here.");
+    note('plates',"Mother sets the table for three. There are only two of us. She says it's habit.");
+  };
+  for(const x of [4,5,6])m.look[x+',4']=plates;
+  const bed=function*(){
+    if(stage()<3)yield say("You slept well. You always do.","You never dream.");
+    else yield say("You lift the mattress. The wood beneath is scored with tally marks.","Hundreds of them. Small, even, patient.","You put the mattress back down very carefully.");
+  };
+  m.look['1,2']=bed;m.look['2,2']=bed;
+  m.enter=function*(){if(stage()>=2&&!F.kitchen)yield* kitchenScene();};
+  npc(m,7,3,{col:'#a86a8a',hair:'#8a8a90',glove:'#f0d0b0',talk:motherTalk});
+  m.trig.push({at:[[5,6]],when:()=>!F.mother1,run:motherTalk});
+  // ---------- ASHMERE ----------
+  m=newMap('ashmere',30,24,'g',{name:'Ashmere',bg:'grass'});
+  rect(m,0,0,30,2,'#');rect(m,0,0,2,24,'#');rect(m,28,0,2,24,'#');rect(m,0,20,30,4,'~');
+  scatter(m,11,45);scatter(m,5,30,'f');
+  rect(m,14,0,2,20,'.');rect(m,11,9,8,5,'.');rect(m,7,9,5,2,'.');rect(m,23,8,1,3,'.');rect(m,18,10,6,1,'.');
+  rect(m,7,18,15,1,'.');rect(m,14,20,2,3,'=');
+  building(m,4,5,6,'R',3);building(m,19,4,8,'r',4);building(m,4,14,6,'q',3);building(m,19,14,5,'q',2);
+  rect(m,4,2,3,2,'f');
+  door(m,7,8,'centerA',5,6);door(m,23,7,'lab',6,7);door(m,7,17,'home',5,6);door(m,21,17,'martA',5,6);
+  door(m,14,0,'route1',11,42);door(m,15,0,'route1',12,42);
+  sign(m,13,3,["NORTH: Route 1 → Thornby, 2 km.","Tamers must register Wild captures with the Wardens. Do not travel after dark."]);
+  sign(m,17,12,["NOTICES","LOST: one tabby cat, answers to Biscuit.","HOLLOW NIGHT, THORNBY, 3rd day. All welcome. Masks required.","WARDENS' LICENSE ceremony at the Professor's lab. Young Tamers, report this morning."]);
+  npc(m,12,11,{col:'#e8a0a0',hair:'#6a4a2a',talk:function*(){
+    yield say(...byStage(
+      ["Pip: Hi! Are you gonna be a Tamer? Mum says Tamers are brave.","Pip: Funny. The sparrows always sing here. Except...","Pip: ...Except when you're around. Weird, huh?"],
+      ["Pip: Is that your Wild? It's so shy! It's hiding behind your legs.","Pip: Mum says don't stare at you. She says you're not mean. You're just... not right.","Pip: What does 'not right' mean?"],
+      ["Pip: Mum says I can't talk to you anymore.","Pip: I drew you! Look. ...Oh. I drew the shadow too. It came out bigger than you."],
+      ["Pip: I drew a new one. The shadow's holding your hand. It's not scary when it holds your hand.","Pip: I think it's lonely. Mum says don't say that out loud."],
+      ["Pip: I left a crumb on the pier for the shadow. Is that silly?","Pip: Gorm says the crumb was gone this morning. Gorm says gulls. But gulls don't say thank you."])());
+    note('pip',"Birds go quiet when I walk by. A little girl said it like a joke. It didn't sound like one.");
+  }});
+  npc(m,15,21,{col:'#6a8a9a',hat:'#caa050',hair:'#aaa',dir:2,talk:lines(byStage(
+    ["Gorm: Fifty years on this pier. Fish bite for everyone.","Gorm: Except the last quarter hour. The whole cove's gone still. Not a ripple."],
+    ["Gorm: Cove's been empty since you started coming round.","Gorm: Not blaming you, mind. Just... noting."]))});
+  npc(m,9,12,{col:'#caa070',hair:'#5a3a2a',talk:lines(byStage(
+    ["Marta: My Flitwing's been hiding in the cupboard since you walked by. It never does that.","Marta: Silly bird."],
+    ["Marta: I'm not scared of you. I'm just checking my windows are locked.","Marta: I always check my windows."]))});
+  npc(m,5,3,{kind:'obj',draw:(sx,sy)=>{ell(sx+16,sy+28,10,3,'rgba(0,0,0,.25)');g.fillStyle='#8a8a98';g.fillRect(sx+8,sy+8,16,20);ell(sx+16,sy+8,8,6,'#8a8a98');g.fillStyle='#6a6a78';g.fillRect(sx+12,sy+14,8,2);ell(sx+9,sy+30,3,2,'#f0a0b0');ell(sx+23,sy+30,3,2,'#f0e060');},
+    talk:function*(){
+      if(stage()<4)yield say("A small headstone. The name has weathered away: W——N.","'Beloved. Six winters.' Fresh flowers lie on it. They are from this morning.","You stand here longer than you meant to. Your chest aches in a place you didn't know could ache.");
+      else yield say("WREN. Beloved daughter of Edda. Six winters.","You kneel. The stone is warm, as if something has been sleeping against it.");
+      note('grave',"A child's grave in Ashmere. W——N. Six winters. I can't stop thinking about it.");
+      if(stage()>=2&&!F.memory1){F.memory1=1;yield* memoryWindow();}
+    }});
+  // ---------- LAB ----------
+  m=room('lab',12,9,'Warden Lab','ashmere',23,8);
+  rect(m,1,2,3,1,'b');rect(m,8,2,3,1,'b');rect(m,3,4,6,1,'T');
+  m.enter=function*(){if(!F.labIntro)yield* labIntro();};
+  const cage=(x,sp)=>npc(m,x,4,{kind:'obj',draw:(sx,sy)=>{
+    g.fillStyle='#3a3a4a';g.fillRect(sx+3,sy+2,26,26);
+    if(!F.starter)drawMon(sp,sx+16,sy+14,22,{fear:true});
+    g.strokeStyle='#caa050';g.lineWidth=2;for(let i=0;i<4;i++){g.beginPath();g.moveTo(sx+6+i*7,sy+2);g.lineTo(sx+6+i*7,sy+28);g.stroke();}
+    g.strokeRect(sx+3,sy+2,26,26);},
+    talk:lines(()=>F.starter?["An empty cage. The door is bent, as if it opened from the inside."]:["Alder: Patience. Let me finish."])});
+  cage(4,'embit');cage(6,'dribb');cage(8,'sprout');
+  npc(m,6,3,{col:'#e8e4d8',hair:'#8a8a98',glove:'#f0d0b0',talk:alderTalk,hat:null});
+  npc(m,10,6,{kind:'mon',sp:'wardhound',size:38,fear:true,talk:function*(){
+    yield say(...byStage(
+      ["Marrow the hound presses itself flat against the wall. The whites of its eyes follow you around the room."],
+      ["Marrow whines and tries to squeeze behind the shelves."],
+      ["Marrow hasn't eaten since you walked in. Alder's bowl sits full and untouched."])());
+    note('hound',"The Professor's old hound shakes whenever I'm in the room.");
+  }});
+  // ---------- CENTER / MART A ----------
+  centerRoom('centerA','Ashmere Wild Center','ashmere',7,9);
+  martRoom('martA','Ashmere Mart','ashmere',21,18,STOCK_A);
+  // ---------- ROUTE 1 ----------
+  m=newMap('route1',24,44,'g',{name:'Route 1',bg:'grass',enc:[
+    {sp:'flitwing',lv:[3,5],w:30},{sp:'mossling',lv:[3,5],w:25},{sp:'puddlet',lv:[3,5],w:20},
+    {sp:'zapkit',lv:[4,6],w:10},{sp:'cindrel',lv:[4,6],w:8},{sp:'dusklet',lv:[5,6],w:3}]});
+  rect(m,0,0,24,1,'#');rect(m,0,43,24,1,'#');rect(m,0,0,2,44,'#');rect(m,22,0,2,44,'#');
+  scatter(m,21,150);scatter(m,9,40,'f');
+  rect(m,11,34,2,10,'.');rect(m,11,34,8,2,'.');rect(m,17,18,2,18,'.');rect(m,8,18,11,2,'.');rect(m,8,6,2,14,'.');rect(m,8,6,5,2,'.');rect(m,11,0,2,8,'.');
+  rect(m,13,38,6,4,'G');rect(m,3,36,6,5,'G');rect(m,19,26,3,6,'G');rect(m,10,21,6,5,'G');rect(m,3,10,5,6,'G');rect(m,13,3,6,5,'G');rect(m,19,36,3,4,'~');
+  door(m,11,0,'thornby',15,26);door(m,12,0,'thornby',16,26);door(m,11,43,'ashmere',14,1);door(m,12,43,'ashmere',15,1);
+  sign(m,13,41,["ROUTE 1. Thornby, 2 km.","Mind the tall grass. Wilds nest there."]);
+  sign(m,16,30,["WANTED: THE HOLLOW.","Not a Wild. Not a person. It wears the shape of one of us.","Wild creatures go still in its presence. It will say it is not hungry. Do not trust anyone who is never hungry.","If you see it, do not run. It prefers it when you run."]);
+  sign(m,10,2,["THORNBY ahead. Hollow Night festival in progress. Masks encouraged."]);
+  pickup(m,20,41,'i_r1a','cage',2,'2 Cages');pickup(m,5,20,'i_r1b','salve',1,'a Salve');pickup(m,20,10,'i_r1c','cage',1,'a Cage');
+  trainer(m,15,28,1,{id:'tobin',name:'Tamer Tobin',sight:5,team:[{sp:'flitwing',lv:4},{sp:'flitwing',lv:5}],reward:80,
+    pre:["Tobin: Hey! Eyes met, so we battle. That's the rule!"],post:["Tobin: My Flitwing wouldn't look at me during that. It kept looking at you."]});
+  trainer(m,11,13,3,{id:'lyra',name:'Tamer Lyra',team:[{sp:'mossling',lv:5},{sp:'puddlet',lv:6}],reward:100,
+    pre:["Lyra: Quick match? ...Why are all my Wilds backing up?"],post:["Lyra: Take care of yours. They look tired. Or scared. I can't tell which."]});
+  npc(m,10,6,{id:'kes',col:'#d8a040',hair:'#2a2a3a',vis:()=>!F.kes1done,dir:2});
+  m.trig.push({at:[[8,9],[9,9]],flag:'kes1',run:kesRoute1});
+  m.trig.push({at:[[17,24],[18,24]],flag:'wick1',run:wickRoute1});
+  // ---------- THORNBY ----------
+  m=newMap('thornby',34,28,'g',{name:'Thornby',bg:'grass',tint:()=>F.festivalStart&&!F.festival?'rgba(80,20,40,.35)':(F.slept?null:'rgba(50,25,90,.28)')});
+  rect(m,0,0,34,1,'#');rect(m,0,27,34,1,'#');rect(m,0,0,2,28,'#');rect(m,32,0,2,28,'#');
+  scatter(m,33,60);scatter(m,7,40,'f');
+  rect(m,9,12,14,6,'.');rect(m,15,0,2,28,'.');rect(m,11,7,1,3,'.');rect(m,6,10,20,1,'.');rect(m,20,6,1,5,'.');
+  rect(m,7,21,10,1,'.');rect(m,16,21,9,1,'.');
+  building(m,7,3,8,'r',4);building(m,22,6,6,'q',3);building(m,18,2,5,'q',2);building(m,4,17,6,'R',3);building(m,22,17,5,'R',2);
+  building(m,26,12,4,'R',null);building(m,3,12,4,'q',null);
+  for(const [x,y] of [[14,22],[17,22],[14,25],[17,25],[14,5],[17,5],[13,13],[18,13],[13,16],[18,16]])setT(m,x,y,'L');
+  door(m,11,6,'gym',7,12);door(m,25,9,'inn',6,7);door(m,20,5,'mask',4,5);door(m,7,20,'centerB',5,6);door(m,24,20,'martB',5,6);
+  door(m,15,27,'route1',11,1);door(m,16,27,'route1',12,1);door(m,15,0,'route2',12,40);door(m,16,0,'route2',13,40);
+  m.trig.push({at:[[15,26],[16,26]],flag:'bell',run:bellScene});
+  m.trig.push({at:[[15,22],[16,22]],flag:'dellMeet',run:dellScene});
+  m.trig.push({at:[[11,7]],when:()=>F.maren&&!F.festival,flag:'festivalStart',run:festivalScene});
+  npc(m,15,14,{kind:'obj',vis:()=>!F.burned,draw:(sx,sy)=>{
+    ell(sx+16,sy+29,10,3,'rgba(0,0,0,.3)');g.fillStyle='#caa050';g.fillRect(sx+10,sy+14,12,14);g.fillRect(sx+4,sy+16,6,3);g.fillRect(sx+22,sy+16,6,3);
+    g.fillStyle='#a88838';g.fillRect(sx+12,sy+24,3,4);g.fillRect(sx+17,sy+24,3,4);
+    ell(sx+16,sy+9,7,7,'#caa050');g.fillStyle='#111';g.fillRect(sx+12,sy+7,3,3);g.fillRect(sx+18,sy+7,3,3);g.fillStyle='#4a3a28';g.fillRect(sx+3,sy+17,4,5);g.fillRect(sx+25,sy+17,4,5);},
+    talk:function*(){
+      yield say("A straw effigy of a child, tied to a post. Button eyes. A dark hole where the mouth should be.","Its hands are stitched into little mittens.","A placard reads: THE HOLLOW. IT WEARS A CHILD'S FACE.");
+      if(stage()>=2)yield say("It's smaller than you expected. And stranger: someone has stitched its gloves exactly the way yours are stitched.");
+      note('effigy',"The festival effigy of the Hollow looks like a child in mittens. Like me. Nobody else seems to notice.");
+    }});
+  npc(m,14,24,{col:'#6a6a7a',hat:'#8a8a98',talk:lines(["Rowan: Gate bell rang when you came through. Rusted rope, must be. Welcome to Thornby."])});
+  npc(m,17,24,{col:'#6a6a7a',hat:'#8a8a98',dir:3,talk:lines(["Guard: First time that bell's rung in fifteen years. Rope must've caught the wind."])});
+  npc(m,17,19,{col:'#5a9a5a',hair:'#4a3a2a',talk:lines(()=>F.maren?["Dell: You beat her! I mean, she let you. I mean, you earned it!"]:F.slept?["Dell: Warden Maren's in the gym. Good luck!"]:["Dell: Trial's at dawn. The inn's up the road, free for Tamers."])});
+  npc(m,13,13,{mask:true,col:'#9a6a4a',hair:'#aaa',talk:lines(()=>F.festival?["Hobb: The fire took well. Thank you, Tamer."]:F.maren?["Hobb: Stay for the burning, Tamer. It's tradition."]:["Hobb: Hollow Night tomorrow! We burn the effigy. Keeps the Hollow's eyes off us another year.","Hobb: Fetch a mask from Maribel's. Everyone wears one. Everyone."])});
+  npc(m,19,14,{mask:true,col:'#8a4a6a',talk:lines(byStage(
+    ["Sarai: Masks so it can't recognise us. The old stories say the Hollow learns faces. Takes the ones it likes.","Sarai: ...Why are you looking at me like that?"],
+    ["Sarai: I keep forgetting your face the second you leave. Isn't that strange?"]))});
+  npc(m,12,16,{mask:true,col:'#4a6a8a',talk:lines(["Piet: Thirty years I've worn this mask and never felt watched through it.","Piet: I felt it just now. When you walked past. (He laughs. It doesn't help.)"])});
+  npc(m,18,16,{mask:true,col:'#e8c0a0',hair:'#6a3a2a',talk:lines(["Lumi: The effigy has mittens like yours!","Lumi: Mum says that's rude to say."])});
+  npc(m,21,13,{mask:true,hat:'#e8a040',col:'#efe6cf',talk:lines(()=>F.festival?["Masked Stranger: Lovely fire. Very... thorough.","He is crying under the mask. He says it's the smoke."]:["Masked Stranger: I am a normal villager. I have always lived here. Do not look at my hat.","Masked Stranger: If you must light the effigy tomorrow... mean it gently. That's all. Good evening!"])});
+  npc(m,9,15,{col:'#7a7a8a',hair:'#ddd',talk:function*(){
+    yield say(...byStage(
+      ["Baba: New Tamer? I can't see you, child. But I can hear hearts.","Baba: ...Odd. I can hear everyone's but yours."],
+      ["Baba: I'm blind, love. But there's no heartbeat where you're standing. Just a waiting.","Baba: Don't look so frightened. Waiting is a kind of life."])());
+    note('baba',"An old blind woman in Thornby says she can't hear my heartbeat.");
+  }});
+  npc(m,15,2,{col:'#6a6a7a',hat:'#8a8a98',vis:()=>!F.festival,talk:lines(()=>F.maren?["Guard: Gate stays shut till the effigy's burned. Festival rules."]:["Guard: Marsh road's closed until the Trial is done. Warden's orders."])});
+  npc(m,16,2,{col:'#6a6a7a',hat:'#8a8a98',vis:()=>!F.festival,talk:lines(["Guard: Rules are rules, Tamer."])});
+  pickup(m,5,24,'i_th1','salve',2,'2 Salves');
+  // ---------- THORNBY interiors ----------
+  centerRoom('centerB','Thornby Wild Center','thornby',7,21);
+  martRoom('martB','Thornby Mart','thornby',24,21,STOCK_B);
+  m=room('mask',8,7,"Maribel's Masks",'thornby',20,6);
+  rect(m,1,2,2,1,'b');rect(m,5,2,2,1,'b');
+  npc(m,4,4,{col:'#c88a6a',hair:'#5a3a2a',talk:maribelTalk});
+  m=room('inn',12,9,'Thornby Inn','thornby',25,10);
+  rect(m,2,3,4,1,'K');setT(m,6,1,'M');rect(m,8,3,2,1,'B');rect(m,8,5,2,1,'B');
+  npc(m,3,3,{col:'#8a6a4a',hair:'#aaa',talk:odoTalk});
+  m.look['6,1']=function*(){
+    if(!F.slept)yield say("The mirror is cracked from corner to corner. Your reflection is split in three.","All three are looking at you.");
+    else yield say("Your reflection is smiling.","You are not.");
+    note('innmirror',"The mirror at the inn cracked the day I arrived. My reflection smiled at me. I wasn't smiling.");
+  };
+  for(const k of ['8,3','9,3','8,5','9,5'])m.look[k]=sleepScene;
+  m=room('gym',14,14,'Warden Trial Hall','thornby',11,7);
+  rect(m,6,2,2,11,'C');for(const [x,y] of [[3,4],[10,4],[3,8],[10,8]])setT(m,x,y,'P');
+  m.enter=function*(){
+    if(!F.slept){yield say("Dell: Trial's at dawn, Tamer. Rest first. The inn's up the road.");yield* goto('thornby',11,7,2);}
+  };
+  trainer(m,4,10,1,{id:'corvin',name:'Junior Corvin',team:[{sp:'flitwing',lv:8},{sp:'mossling',lv:9}],reward:150,
+    pre:["Corvin: Maren says only the steady pass. I say prove it."],post:["Corvin: My Wilds kept staring at the door the whole fight. Like they wanted to leave."]},{col:'#4a6aa8'});
+  trainer(m,9,6,3,{id:'ines',name:'Junior Ines',team:[{sp:'puddlet',lv:8},{sp:'zapkit',lv:9}],reward:160,
+    pre:["Ines: Dell said you'd come. He also said not to stare at your hands."],post:["Ines: ...I stared. Sorry."]},{col:'#a84a6a'});
+  npc(m,7,3,{col:'#c0392b',hair:'#2a2a2a',glove:'#d8c8a0',talk:marenTalk});
+  // ---------- ROUTE 2 ----------
+  m=newMap('route2',26,42,'~',{name:'Mirewood Fen',bg:'marsh',tint:()=>'rgba(150,200,190,.1)',enc:[
+    {sp:'marshhop',lv:[10,13],w:28},{sp:'reedback',lv:[10,13],w:22},{sp:'mossling',lv:[9,12],w:15},
+    {sp:'voltmink',lv:[11,14],w:15},{sp:'gloomjaw',lv:[12,14],w:8},{sp:'dusklet',lv:[10,13],w:8},{sp:'puddlet',lv:[9,12],w:4}]});
+  rect(m,4,30,18,9,'m');rect(m,6,20,14,8,'m');rect(m,8,13,10,7,'g');rect(m,5,6,16,6,'m');rect(m,12,4,2,38,'=');
+  building(m,10,0,6,'R',2);setT(m,13,3,'D');
+  door(m,12,41,'thornby',15,1);door(m,13,41,'thornby',16,1);door(m,12,3,'tower1',6,12);door(m,13,3,'tower1',6,12);
+  trainer(m,15,34,3,{id:'ysolde',name:'Tamer Ysolde',team:[{sp:'reedback',lv:12},{sp:'marshhop',lv:12}],reward:300,
+    pre:["Ysolde: Quiet out here, huh? The reeds hush when you pass. They never hush for me."],post:["Ysolde: The frogs stopped croaking the second you stepped on the boardwalk. All of them. At once."]});
+  trainer(m,10,24,1,{id:'brann',name:'Tamer Brann',team:[{sp:'voltmink',lv:13},{sp:'puddlet',lv:12},{sp:'mossling',lv:12}],reward:360,
+    pre:["Brann: Everything went silent a mile back. Did you do that?"],post:["Brann: I'll fight anyone. I'd rather not fight whatever that was."]});
+  npc(m,12,5,{col:'#4a6a4a',hat:'#8a8a98',dir:2,vis:()=>!F.haleDone,talk:haleTalk});
+  npc(m,13,5,{col:'#4a6a4a',hat:'#8a8a98',dir:2,vis:()=>!F.haleDone,talk:haleTalk});
+  npc(m,15,16,{kind:'obj',draw:(sx,sy)=>{
+    ell(sx+16,sy+30,12,4,'rgba(0,0,0,.3)');g.strokeStyle='#8a8aa0';g.lineWidth=3;g.beginPath();g.moveTo(sx+13,sy+26);g.lineTo(sx+13,sy+34);g.moveTo(sx+19,sy+26);g.lineTo(sx+19,sy+34);g.stroke();
+    ell(sx+16,sy+14,11,13,'#c8c8dc');ell(sx+16,sy+16,7,9,'#e8e8f4');
+    g.strokeStyle='#c8c8dc';g.lineWidth=5;g.beginPath();g.moveTo(sx+19,sy+6);g.quadraticCurveTo(sx+30,sy-2,sx+24,sy-14);g.stroke();
+    ell(sx+24,sy-15,5,4,'#e8e8f4');tri(sx+27,sy-16,sx+38,sy-13,sx+27,sy-12,'#e8a840');ell(sx+25,sy-16,1.5,1.5,'#111');},
+    talk:lines(()=>F.heron?["The Elder Heron watches the water. It does not look at you. It has said what it needs to."]:["The Heron is waiting for you to come closer."])});
+  m.trig.push({at:[[12,17],[13,17]],flag:'heronMet',run:heronScene});
+  m.trig.push({at:[[12,29],[13,29]],flag:'wick2',run:wickFen});
+  pickup(m,9,15,'i_r2a','cage',3,'3 Cages');pickup(m,16,14,'i_r2b','salve',2,'2 Salves');pickup(m,6,22,'i_r2c','iron',1,'an Iron Cage');
+  // ---------- TOWER ----------
+  m=room('tower1',12,14,'Lighthouse','route2',12,4);
+  for(const [x,y] of [[2,4],[9,4],[2,9],[9,9]])setT(m,x,y,'P');
+  setT(m,6,2,'D');door(m,6,2,'tower2',6,10);
+  npc(m,6,3,{id:'kes',col:'#d8a040',hair:'#2a2a3a',vis:()=>!F.kesTower,talk:function*(){yield* kesTowerScene();}});
+  m.trig.push({at:[[5,8],[6,8],[7,8]],flag:'kesScene',when:()=>!F.kesTower,run:kesTowerScene});
+  m.trig.push({at:[[5,11],[6,11],[7,11]],flag:'wickT',run:wickTower});
+  npc(m,4,3,{id:'vesper',col:'#efe6cf',col2:'#e8a040',hair:'#a8322a',hat:'#e8a040',vis:()=>F.wickDone,talk:lines(["Vesper: Go on. We'll be at the bottom of the stairs, whatever comes down them."])});
+  npc(m,8,3,{id:'tuck',col:'#efe6cf',col2:'#e8a040',hair:'#6a4a2a',hat:'#e8a040',vis:()=>F.wickDone,talk:lines(["Tuck: *sniff* Sorry. Dust. It's very dusty in here. Mothball, tell them it's dusty."])});
+  m=room('tower2',12,12,'Lamp Room','tower1',6,3,{bg:'tower'});
+  npc(m,6,2,{kind:'obj',draw:(sx,sy)=>{const a=.6+.4*Math.sin(S.t*2);ell(sx+16,sy+16,26,26,`rgba(255,220,140,${a*.25})`);g.fillStyle='#caa050';g.fillRect(sx+8,sy+8,16,22);ell(sx+16,sy+10,8,8,`rgba(255,230,160,${.6+a*.4})`);},talk:lines(["The great lamp. Its brass is warm. It hums at a pitch you feel in your teeth."])});
+  npc(m,6,4,{col:'#e8e4d8',hair:'#8a8a98',talk:function*(){yield* finaleScene();},dir:2});
+  npc(m,6,9,{col:'#a86a8a',hair:'#8a8a90',vis:()=>F.motherHere,talk:lines(["Edda: I'm here. I'm not going anywhere."])});
+  m.trig.push({at:[[5,7],[6,7],[7,7]],flag:'finaleStart',when:()=>!F.finale,run:finaleScene});
+  for(const k in MAPS)clearUnder(MAPS[k]);
+}
+// ===== STORY SCRIPTS =====
+const COUNTER={embit:'dribb',dribb:'sprout',sprout:'embit'};
+
+function* trainerFight(e,spotted){
+  const T=e.trainer;
+  if(F['t_'+T.id]){yield say(...T.post);return;}
+  if(spotted){yield excl(e);yield approach(e);}
+  yield say(...T.pre);
+  const r=yield* doBattle({kind:'trainer',team:T.team,trainer:T,bg:M.bg});
+  if(r==='lose'){yield* blackout();return;}
+  F['t_'+T.id]=1;G.money+=T.reward;
+  yield say(...T.post,`You received ¥${T.reward}.`);
+}
+
+function* centerTalk(){
+  yield say(...(stage()<2
+    ?["Willa: Welcome! Let me take a look at your Wilds.","Willa: ...All patched up. They're so quiet, though. Wilds usually chatter."]
+    :["Willa: I'll take them. ...They're fine. They just don't want to go back to you. Isn't that odd?","Willa: Never mind me. Rest well."]));
+  healAll();G.lastHeal={map:M.id,x:P.x,y:P.y};
+  if(stage()>=2)note('willa',"The nurse says my Wilds are fine, they just don't want to come back to me.");
+}
+
+// ----- Ashmere -----
+function* motherTalk(){
+  if(!F.mother1){
+    F.mother1=1;
+    yield say("Mother: There you are. Sit, sit. Eat something.",
+      "You sit in your usual chair. The stew steams, and smells of nothing at all.",
+      "You push it around the bowl. She pretends not to watch.",
+      "Mother: Not hungry? Hm. You never are, in the mornings. You always did prefer your meals outdoors.",
+      "Mother: Today's the day, isn't it? Professor Alder's been by twice.",
+      "She reaches to straighten your collar, and stops, her hand hovering an inch from your neck. She turns it into a wave.",
+      "Mother: Your father would be so proud. Here: Cages, a little Salve, some coin for the road.",
+      "Mother: And dear? Keep your gloves on. Please. People... ask questions.");
+    G.bag.cage+=5;G.bag.salve+=3;G.money+=300;
+    yield say("You received 5 Cages, 3 Salves and ¥300.");
+    note('gloves',"Mother made me promise to keep my gloves on. She never touches me. She hovers.");
+    return;
+  }
+  const s=stage();
+  if(s===0)yield say("Mother: Go on. Alder's waiting. I'll be here.");
+  else if(s===1)yield say("Mother: Be home before dark, dear.","Mother: ...Or don't. I'll leave the window open, as I always do.");
+  else if(s===2)yield say("Mother: You're back! I...","Mother: You were gone four days, you know. I left the window open. Like always.");
+  else if(s===3){
+    yield say("Mother: They told me about the festival. The burning.","Mother: Did you light it?");
+    yield say(F.torch?"Mother: ...I see.":"Mother: Good. Good.");
+  }else if(s===4)yield say("Mother: You've been to the fen. You smell like rain.","Mother: Go to the Lighthouse, dear. Alder will tell you what he thinks you are.","Mother: I'll tell you what I know you are, when you come home.");
+  else yield say("Mother: Go on. I'll be here. I'm always here.");
+}
+function* alderTalk(){
+  const s=stage();
+  if(s<=1)yield say("Alder: Thornby is north. Mind the path.","Alder: And do keep your gloves on. For the cold.");
+  else if(s<4)yield say("Alder: Already back? ...No. Of course not. Carry on.");
+  else yield say("Alder: ...The Lighthouse, then. I'll be there before you.");
+}
+function* labIntro(){
+  F.labIntro=1;
+  yield walkTo(P,6,5);
+  yield say("Alder: There you are. I'd begun to think you'd sleep through your own beginning.",
+    "He stands on the far side of the long table, and keeps the table between you. In the corner, the old hound has pressed itself flat against the wall.",
+    "Alder: Today the Wardens open the License to Ashmere's young. You will hunt Wilds. Cage them. Learn them. Fill the Wildbook.",
+    "Alder: A Warden's work in miniature: keep the Wilds from the towns, and the towns from the Wilds.",
+    "Alder: And keep an eye out for the Hollow, of course. Everyone does.",
+    "He laughs. It doesn't land.");
+  const kes=npc(M,6,8,{id:'kes',col:'#d8a040',hair:'#2a2a3a',dir:0});
+  yield walkTo(kes,7,6);
+  yield say("Kes: Sorry! Sorry, I'm here! Did I miss it?",
+    "Kes: Oh. Hey. You're already here. You're always already here.",
+    "Kes: ...That sounded weird. Forget it.");
+  const c=yield ask("Three Wilds came from the fen this morning, quite willingly. Choose your partner.",["Embit (flame)","Dribb (tide)","Sprout (bloom)"]);
+  const pick=['embit','dribb','sprout'][c],kp=COUNTER[pick];
+  G.party.push(mkMon(pick,5));F.starter=pick;G.seen[pick]=1;G.caught[pick]=1;
+  yield say(`The cage door opens on its own. ${SP[pick].name} doesn't bound out. It crawls, belly low, eyes on the floor.`,
+    "It keeps as far from you as the room allows... but it comes. It sits at your heel, trembling.",
+    "Alder: Remarkable. They always bow to something strong.");
+  note('starter',"My first partner shakes whenever I look at it. But it stays close, like it's more afraid of leaving.");
+  yield say(`Kes: Ha! Then I'll take ${SP[kp].name}. It beats yours. Come on, first battle! Right here!`);
+  const r=yield* doBattle({kind:'trainer',team:[{sp:kp,lv:5}],trainer:{name:'Kes'},bg:'indoor'});
+  if(r==='lose')healAll();
+  yield say("Kes: Whoa. Your Wild didn't dodge once. It just took it. Like it didn't want to run.",
+    "Kes: Hey, why the gloves? It's the middle of summer.");
+  const q=yield ask("What do you tell him?",["Cold hands.","A rash. It's nothing.","..."]);
+  F.lies=q<2?1:0;
+  yield say(["Kes: Cold hands. Right. You do always run cold. ...I think.","Kes: Gross. Okay.","Kes: ...Okay. Weird, but okay."][q],
+    "Kes: I've known you forever. Since... the festival? No. The fen. No, wait. Huh.",
+    "Kes: Doesn't matter! See you in Thornby!");
+  yield walkTo(kes,6,8);
+  M.ents.splice(M.ents.indexOf(kes),1);
+  note('kes',"Kes says he's known me forever. He can't remember how we met. Neither can I.");
+  yield say("Alder: This is the Wildbook. Fill it. Fill it all.",
+    "He says it the way someone says a prayer they no longer believe in.",
+    "Alder: Take the north road to Thornby. Warden Maren runs the Trial there. Earn her Seal.",
+    "Alder: Stay on the path. If anything out there frightens you, remember: it is almost certainly more afraid of you.",
+    "The amulet at his throat clicks softly against his collar.");
+}
+
+// ----- Route 1 -----
+function* kesRoute1(){
+  const kes=M.ents.find(e=>e.id==='kes');
+  yield excl(kes);yield approach(kes);
+  yield say("Kes: Hey! Over here! I've caught three already. Look!",
+    "Kes: ...Okay, two. One got away. But it LOOKED at me first, so that counts.",
+    "Kes: Dad says the Wardens are meeting at the Lighthouse. They think the Hollow is close. Everyone's skittish.",
+    "Kes: You ever think about it? What it would be like, being the only one of something?",
+    "Kes: ...Never mind. Race you to Thornby! But first, battle!");
+  const r=yield* doBattle({kind:'trainer',team:[{sp:COUNTER[F.starter],lv:7},{sp:'flitwing',lv:6}],trainer:{name:'Kes'},bg:'grass'});
+  if(r==='lose'){healAll();yield say("Kes: Whoa, are you okay? Here, I've got a spare Salve.");G.bag.salve++;}
+  else{G.money+=200;yield say("Kes: You're getting scary good, you know that? Ha. Scary. Good.","You received ¥200.");}
+  yield say("Kes: I'm running ahead. Don't let the tall grass get you!");
+  yield walkTo(kes,11,1);
+  F.kes1done=1;
+}
+
+// ----- Thornby -----
+function* bellScene(){
+  yield shake(400);
+  yield say("A bell tolls from the gate tower. Slow. Heavy. Everyone in the square turns to look.",
+    "The guard tugs at the rope, then stares at his own hands.",
+    "Rowan: Huh. That's the Warden's Bell. It rings when... no. No, that's not it. It's rusted. It must be rusted.",
+    "Rowan: Welcome to Thornby, Tamer.",
+    "Several villagers glance at you, and then very carefully at their feet.");
+  note('bell',"A Warden's Bell rang when I walked into Thornby. The guard said it must be rusted.");
+}
+function* dellScene(){
+  yield say("Dell: Tamer? Are you the one from Ashmere? I'm Warden Maren's apprentice.",
+    "Dell: Maren's out in the fen until dawn. The Trial is tomorrow morning. Tomorrow night is Hollow Night, the festival.",
+    "Dell: The inn's up the road. It's free for Tamers. And Maribel's, by the north-east gate, has masks. Everyone wears one.",
+    "Dell: ...You don't have to. I mean, you should. I mean, you do you.");
+}
+function* maribelTalk(){
+  if(!G.mask){
+    yield say("Maribel: A Tamer! And no mask. Everyone wears one for the festival. Everyone.",
+      "She turns one over in her hands: white, blank, two narrow eye slits.",
+      "Maribel: This one's yours. ...Especially yours.");
+    const c=yield ask("Wear the mask?",["Put it on","Not now"]);
+    if(c===0){
+      G.mask=true;
+      yield say("You put it on. The whole room breathes out.","Maribel: There. Now you look like one of us.","Maribel: ...Don't take it off, will you? Not tonight.");
+      note('mask',"When I put on the mask, everyone in the room relaxed. As if my face was the problem.");
+    }else yield say("Maribel: It'll be here. It always is.");
+  }else yield say("Maribel: It suits you. Better than your face did.","Maribel: I'm sorry. That came out wrong.");
+}
+function* odoTalk(){
+  yield say("Odo: Room's free for Tamers. Take any bed.","Odo: Don't mind the mirror. Cracked this morning. Since you walked in, actually. Funny.");
+  yield* sleepScene();
+}
+function* sleepScene(){
+  if(F.slept){
+    yield fade(1,500);healAll();yield wait(500);yield fade(0,500);
+    yield say("You rest. The room is very quiet.");return;
+  }
+  const c=yield ask("Rest for the night?",["Sleep","Not yet"]);
+  if(c===1)return;
+  yield fade(1,800);
+  yield cut("Tall grass. The world is enormous.",
+    "You are low to the ground. Your breath is fog. You are so, so hungry.",
+    "Something small in the grass. Soft. Warm. Shaking.",
+    "It looks at you. It knows.",
+    "It tasted like fear and honey.",
+    "Above you, a human hand lowers a lantern. A voice, very quiet:",
+    "'Shhh. There you are. Come home.'");
+  healAll();F.slept=1;
+  yield wait(400);yield fade(0,800);
+  yield say("Morning. Sun through the shutters.","Your jaw aches. There is something caught between your teeth.","You decide not to look at what it is.");
+  note('dream',"I dreamed I was the one hunting in the grass. I woke with something in my teeth.");
+}
+function* marenTalk(){
+  if(F.maren){yield say("Maren: The Lighthouse, Tamer. Council meets soon. Go as a Tamer.");return;}
+  if(!F.t_corvin||!F.t_ines){yield say("Maren: Two juniors stand between you and me. That's how the Trial works. Go on.");return;}
+  yield say("Maren: So. The Tamer from Ashmere.",
+    "She studies you the way one studies a river before crossing.",
+    "Maren: The Trial exists for a reason, and it isn't sport. Wardens test Tamers because Tamers are who stand between the towns and the Hollow.",
+    "Maren: Show me you hold the cage. Not the other way around.");
+  const r=yield* doBattle({kind:'trainer',team:[{sp:'thornlet',lv:10},{sp:'fennick',lv:11},{sp:'voltmink',lv:12}],trainer:{name:'Warden Maren'},bg:'indoor'});
+  if(r==='lose'){yield* blackout();return;}
+  F.maren=1;G.money+=600;
+  yield say("Maren: ...Well fought.",
+    "Maren: Give me your hand. The Seal passes from my hand to yours.",
+    "She takes your gloved hand. Her fingers close around it, and she goes very still.",
+    "Maren: Cold. Like river stone.",
+    "Maren: How long have you been wearing these gloves?",
+    "You don't answer. She lets go.",
+    "Maren: I've seen that mark on your wrist before. In the old Warden books. ...No. Never mind. I'm tired.",
+    "You received the Ember Seal and ¥600.",
+    "Maren: Tonight is Hollow Night. Stay for the burning. Tomorrow the marsh road opens.",
+    "Maren: And Tamer? Whatever you decide to be, decide it before the Council decides for you.");
+  note('maren',"Maren held my hand and said it was cold as river stone. She looked frightened. Then she gave me a badge anyway.");
+}
+function* festivalScene(){
+  yield fade(1,500);setMap('thornby',15,16,0);
+  M.ents.push({kind:'npc',id:'kes',x:18,y:16,ox:0,oy:0,dir:3,solid:true,col:'#d8a040',hair:'#2a2a3a',mask:true,mv:false});
+  yield fade(0,700);
+  yield say("Dusk. Lanterns bloom along the avenue. The whole town has gathered in the plaza, every face behind a mask.",
+    "Every face but, perhaps, yours.",
+    "Hobb: Tamer! You've done Thornby proud. It's tradition: the Trial's victor lights the effigy.");
+  const c=yield ask("Hobb holds out a torch.",["Take the torch","Decline"]);
+  if(c===0){
+    F.torch=1;
+    yield say("The torch is heavier than it looks. The straw child stares up at you with button eyes.",
+      "You hold the flame to its mittened hands.");
+  }else{
+    yield say("Hobb: No matter. Your friend will do it.",
+      "Kes takes the torch. His hand is steady. His eyes are not.");
+  }
+  yield shake(900);
+  yield say("The crowd begins to chant, softly: 'Out, out, hungry one. Out, out, hungry one.'",
+    "The fire climbs. The buttons pop one by one.",
+    "For a moment, you feel the heat on your own skin, in the same places. Under your gloves, a seam splits. You tuck it away before anyone sees.");
+  F.burned=1;F.festival=1;
+  yield say("Kes: Hey. You okay? You're shaking.","@: It's the cold.","Kes: It's the middle of summer.",
+    "Kes: ...I'm heading to the Lighthouse. My dad's there. Meet me?");
+  const kes=M.ents.find(e=>e.id==='kes'&&!e.trainer);
+  yield walkTo(kes,16,27);M.ents.splice(M.ents.indexOf(kes),1);
+  note('festival',"They burned a child-shaped effigy and chanted 'out, hungry one'. I felt the heat on my own hands.");
+}
+
+// ----- Route 2 -----
+function* haleTalk(){
+  yield say("Hale: Halt. Warden cadet. The Council's inside the Lighthouse, and I'm to check every Tamer's hands.","Hale: Standard procedure. Take off the gloves.");
+  const c=yield ask("Take off your gloves?",["Take them off","Refuse"]);
+  if(c===0){
+    yield say("You peel off the gloves. The nails are too dark. Too long. Curved like something never meant to hold a pencil.",
+      "They've always been like this, haven't they? You've simply never looked.",
+      "Hale stares for a very long moment. Then, very carefully, he looks at the sky.",
+      "Hale: ...Looks fine to me. Pass.");
+    F.glovesOff=1;note('claws',"I took my gloves off. My nails are claws. They've always been claws.");
+  }else{
+    yield say("@: I'd rather not.","Hale: ...Regulations say I have to ask. They don't say I have to insist.","He steps aside. His hands are shaking.");
+  }
+  F.haleDone=1;
+}
+function* heronScene(){
+  yield say("The Elder Heron stands in the shallows like a pillar of dusk. As you near, every Wild in the marsh falls silent.",
+    "Not fear. Something older. Reverence?",
+    "Elder Heron: Little hungry one. You came the long way around.",
+    "Elder Heron: Do not be afraid. We are not. That has been the secret all along.");
+  const c=yield ask("It is looking directly at you.",["Who are you talking to?","I'm not hungry.","(Say nothing)"]);
+  yield say([ "Elder Heron: You know who. You have always known who.","Elder Heron: Not hungry. Mm. And yet.","Elder Heron: Silence is honest. You were always good at it."][c],
+    `Elder Heron: ${G.hunted} of my grandchildren sleep in your cages. Yes. I count them. I do not blame you.`,
+    "Elder Heron: A tide is not cruel. It takes the sand, and the sand is never angry.",
+    "Elder Heron: The Hollow is the oldest hunger in the fen. It does not hate us. It is how we end. And we are how it eats.",
+    "Elder Heron: But you forgot. You put on a small shape and forgot, because someone loved the shape. That is a rare magic, child. It does not last.",
+    "Elder Heron: The man at the Lighthouse knows. Ask him what he did on the night of the rain.",
+    "Elder Heron: One thing I ask. Open your cages. Let some of them breathe.");
+  F.heron=1;
+  note('heron',"The Elder Heron called me 'little hungry one'. It said I was the Hollow. It wasn't angry. That's the worst part.");
+  const r=yield ask("Release your caged Wilds? You would keep only your first partner.",["Release them all","Not yet"]);
+  if(r===0){
+    const first=G.party.find(m=>m.sp===F.starter)||G.party[0];
+    const n=G.party.length-1+G.box.length;
+    G.party=[first];G.box=[];G.mercy+=n;G.spared+=n;F.releasedAll=1;
+    yield say("One by one the cages open. None of them run at first. They look at you.",
+      "Then, slowly, they walk into the reeds. The last, a tiny Mossling, presses itself against your shin before it goes.",
+      "For the first time all day, something touches you without fear.",
+      "Elder Heron: Keep the first. It chose you. That is not a debt, child. That is a gift.");
+    note('released',"I opened every cage. They didn't run at first. The little one touched my leg before it left.");
+  }else yield say("Elder Heron: Then carry them a little longer. But they will remember who held the door.");
+}
+
+// ----- Lighthouse -----
+function* kesTowerScene(){
+  if(F.kesTower)return;
+  const kes=M.ents.find(e=>e.id==='kes'&&e.vis!==undefined)||M.ents.find(e=>e.id==='kes');
+  yield say("Inside the Lighthouse, an iron stair spirals into the dark. At its foot stands Kes, an open ledger in his hands. His mask hangs around his neck.",
+    "Kes: I found it in the Warden register. 'Hollow, juvenile. Last sighted: Ashmere fen, fifteen years ago, the night of the Great Rain.'",
+    "Kes: 'Took the shape of a dead child. Daughter of Edda, of Ashmere.' ...Your mum's name is Edda.",
+    "Kes: Dad says the Hollow gets itself remembered into places. It plants itself in people's memories so no one asks where it came from.",
+    "Kes: I've known you my whole life, and I can't tell you a single day I met you.");
+  const c=yield ask("Kes: Tell me it's not you.",["I don't know.","It's not me.","..."]);
+  F.lies=(F.lies||0)+(c===1?1:0);
+  yield say(["Kes: That's the first honest thing you've ever said to me.","Kes: You're a bad liar. You've never had to practice.","Kes: Yeah."][c],
+    "Kes: I'm not going to hurt you. But I'm not letting the Council do it either, not without you being able to face them.",
+    "Kes: So fight me. Properly. If I can't beat you, I'll believe you get to decide what you become.");
+  while(true){
+    const r=yield* doBattle({kind:'trainer',team:[{sp:COUNTER[F.starter],lv:16},{sp:'voltmink',lv:15},{sp:'fennick',lv:15}],trainer:{name:'Kes'},bg:'tower'});
+    if(r==='win'||r==='ran')break;
+    healAll();yield say("Kes: Again. I'm not going anywhere.");
+  }
+  F.kesTower=1;G.bag.salve+=5;G.money+=500;
+  yield say("Kes: ...Yeah. Okay. Yeah.",
+    "He pulls the scarf from his own neck and winds it, clumsily, around yours, over the place where the mask strings sit.",
+    "Kes: For the cold. Even if it's the middle of summer. Especially then.",
+    "Kes: Go up. Alder's waiting. I'll be right behind you. Probably.","You received 5 Salves and ¥500.");
+  note('kesfight',"Kes knows what I am. He fought me anyway, and then he let me go up the stairs.");
+}
+
+// ----- The Ashen Wick: a crew of ex-Wardens and failed pamphleteers, trying (badly, kindly) to stop the Hollow -----
+function wickCrew(x,y,dir=2){
+  const o={col:'#efe6cf',col2:'#e8a040',hat:'#e8a040',dir};
+  return [npc(M,x,y,Object.assign({id:'vesper',hair:'#a8322a'},o)),
+    npc(M,x+1,y,Object.assign({id:'tuck',hair:'#6a4a2a'},o)),
+    npc(M,x-1,y,{id:'mothball',kind:'mon',sp:'dusklet',size:30,dir})];
+}
+const unspawn=(...es)=>{for(const e of es){const i=M.ents.indexOf(e);if(i>=0)M.ents.splice(i,1);}};
+function* blastOff(...es){
+  yield say("Vesper: This isn't over! We'll be back! Tuck, the smoke bomb!",
+    "Tuck: We sold the smoke bomb. For the pamphlet printer. Which we also sold.",
+    "Vesper: Then just run dramatically!",
+    "Both: Team Ashen Wick is blasting off again! ...On foot!");
+  yield shake(500);unspawn(...es);
+}
+const WICKMOTTO=["Vesper: Prepare for trouble! We've come to snuff the dark!","Tuck: And make it double! We hold the light, we hold the spark!",
+  "Vesper: To shield the fen from a hunger no one has named!","Tuck: To keep the lanterns lit and the little ones unclaimed!",
+  "Vesper: I'm Vesper!","Tuck: I'm Tuck!","Both: Team Ashen Wick, keeping watch all night!"];
+
+function* wickRoute1(){
+  const crew=wickCrew(17,20),v=crew[0];
+  yield excl(v);yield approach(v);
+  yield say("A figure in a cream cloak and a flame-orange hat steps out of the tall grass. Two more follow, less dramatically.",...WICKMOTTO,
+    "Mothball the Dusklet flutters in a small, dignified circle. Nobody applauds.",
+    "Vesper: Now. Tamer. Hand over your Wilds. We're not stealing. We're relocating. For their safety.",
+    "Tuck: Cages are unkind. I read it in a pamphlet. I wrote the pamphlet.");
+  note('wick1',"Three people in cream cloaks tried to 'relocate' my Wilds. They kept saying it was for the Wilds' safety. They seemed to mean it.");
+  const r=yield* doBattle({kind:'trainer',team:[{sp:'dusklet',lv:6},{sp:'mossling',lv:6},{sp:'puddlet',lv:7}],trainer:{name:'Team Ashen Wick'},bg:'grass'});
+  if(r==='lose'){unspawn(...crew);yield* blackout();return;}
+  G.money+=150;
+  yield say("Vesper: Ow. Ow ow ow. Okay. That wasn't in the plan.",
+    `Vesper: ...Your ${SP[F.starter].name}. It's shaking, isn't it? And it's pressed against your leg like you're the only warm thing in the world.`,
+    "Vesper: Afraid of you and clinging to you at once. Huh. I've never seen that. Not from the old stories.",
+    "Tuck: Vesper, we're meant to be villains.","Vesper: I KNOW, Tuck.","You received ¥150.");
+  yield* blastOff(...crew);
+}
+
+function* wickFen(){
+  const crew=wickCrew(12,26),[v,t,mb]=crew;
+  yield shake(300);
+  yield say("Something heavy drops from the reeds: a net woven with brass bells. It lands squarely on Tuck.",
+    "Tuck: ...It worked! I mean, it worked on me. Hello, Tamer.",
+    "Vesper: The Lantern Snare! Tuck, I said AIM. Never mind. Stand back, Tamer. We're serious this time.");
+  yield excl(v);yield approach(v);
+  const r=yield* doBattle({kind:'trainer',team:[{sp:'dusklet',lv:12},{sp:'reedback',lv:12},{sp:'marshhop',lv:12}],trainer:{name:'Team Ashen Wick'},bg:'marsh'});
+  if(r==='lose'){unspawn(...crew);yield* blackout();return;}
+  G.money+=400;
+  yield say("Vesper drops her guard, and her hat, and sits down on the boardwalk. Tuck helps her. Mothball lands in your shadow and curls up.",
+    "Vesper: Fine. I'll say it once. I wasn't always a villain with a pamphlet. I was a cadet. I had a sister. Ione. Eleven winters.",
+    "Vesper: The last Hollow came to our village as a lamplighter. It was kind for three weeks. Then it ate the lanterns. Then the village.",
+    "Vesper: I swore I would stop it from happening again. To anyone. So I've followed you for three days.",
+    "Vesper: You heal your Wilds before yourself. Every time. After every capture your hands shake, like you're ashamed.",
+    "Vesper: The thing that took Ione was never ashamed. Not once.",
+    "Vesper: So here's my problem, Tamer. I came to stop the Hollow. I'm no longer sure it's you I came to stop.");
+  const c=yield ask("What do you say to her?",["I don't know what I am.","I won't hurt anyone.","Then stop me."]);
+  yield say([ "Vesper: Then we're a pair. I don't know what I am either, without Ione to protect.","Vesper: Won't. Or can't? ...Never mind. Promise me you'll tell us when you can't.","Vesper: No. I don't think I will. That's the horrible part."][c],
+    "Vesper: A lantern doesn't fight the dark. It stays lit, and everyone else decides what to do with it. That's all the Wick has ever been.",
+    "Mothball rests its small head against your glove. Dusklets aren't drawn to lanterns. It's drawn to you. It remembers you.",
+    "Vesper: Traitor.","Tuck: We don't use Cages anymore. I burned the pamphlets. Here: Salves. And a little money. For the road.",
+    "You received 4 Salves and ¥400.");
+  G.bag.salve+=4;
+  note('wick2',"The Ashen Wick tried to stop me twice. Their leader lost a sister to the last Hollow. She said she's no longer sure it's me she came to stop.");
+  yield* blastOff(...crew);
+}
+
+function* wickTower(){
+  const crew=wickCrew(6,9,0);
+  yield say("They aren't hiding this time. Vesper, Tuck and Mothball stand in the middle of the room in their cream cloaks, each holding a small candle low, like people at a vigil.",
+    "Vesper: Don't worry. We're not here to fight.","Tuck: We tried that twice. It didn't take.",
+    "Vesper: The Council's Seal-bearers arrive at first light. Warden Hale is holding them at the boardwalk with a very long, very slow form.",
+    "Vesper: Alder asked us to hold these stairs until you've had your night. He didn't say what it was for. He rarely does.",
+    "Vesper: I rewrote the motto. Do you want to hear it?",
+    "Vesper: Prepare for trouble. And make it kind. We don't cage the dark. We keep it company, and stay till morning.",
+    "Both: Team Ashen Wick, keeping watch... even for you.","Tuck: I cried for an hour writing it.",
+    "Vesper pins a small candle charm to your coat. It is wonky and badly stitched.",
+    "Vesper: Tuck made it. If you ever feel the hunger and don't want to be alone with it, light it. Wherever you are, one of us will see.","Vesper: We're very good at looking at lights.",
+    "Mothball pushes its head into your palm. The glove is between you. It doesn't seem to mind.",
+    "Vesper: Go on up. We'll be at the bottom of the stairs. Whatever comes down them.");
+  unspawn(...crew);F.wickDone=1;G.money+=300;
+  yield say("You received ¥300 and a Candle Charm.");
+  note('wick3',"The Ashen Wick wrote a new motto, and it's kind. Vesper gave me a candle charm so I won't have to be alone with the hunger.");
+}
+
+// ----- memory & home scenes -----
+function* memoryWindow(){
+  yield fade(1,500);
+  yield cut("A kitchen at dawn. Rain on the glass. A woman asleep at a table, her head on her arms, a child's drawing crushed in one fist.",
+    "The smell of her grief comes off her like heat. Rich. Sweet. You have never been so hungry.",
+    "You could take her in three bites. You know it the way you know your own hands.",
+    "But there is a cold bed in the next room, and her grief is shaped like a girl with a gap in her teeth.",
+    "So you take the shape. It is easier than the other thing. It is warmer. It fits like a coat that is still warm from someone else.",
+    "The woman wakes. She looks at you for a very long time. She does not scream.",
+    "The memory lets go. You are kneeling at the grave. Your hands are shaking, and the gloves are wet.");
+  yield fade(0,600);
+  note('memory1',"At the grave I remembered a kitchen at dawn, a woman weeping, and how hungry I was. I took her daughter's face. It was easier than the alternative.");
+}
+function* kitchenScene(){
+  F.kitchen=1;
+  yield say("The kitchen is warm. The window above the sink is open a hand's width, as it always is.",
+    "Edda sits at the table. Three bowls. One is already steaming in front of your chair.",
+    "Edda: I made stew. I know it tastes of nothing. I make it anyway. It's the only way I know to say it.");
+  const c=yield ask("The bowl steams in front of you.",["Eat a spoonful.","Push the bowl away."]);
+  if(c===0)yield say("Nothing. Warm nothing. You swallow anyway.","Edda watches as if you had done something heroic. Her eyes shine. She pretends it's the steam.");
+  else yield say("Edda: That's all right. It'll keep. It always keeps.","She does not look hurt. She looks like someone who has been pushed away every night for fifteen years, and sets the bowl down again anyway.");
+  yield say("Edda: The third bowl isn't for you. I should say that. It's for someone who isn't coming. I set it every night.",
+    "Her hand drifts across the table toward yours, and stops an inch away, as it always does.",
+    "Then, slowly, she turns it palm up and lays it flat on the wood beside yours. And leaves it there. Like leaving a window open.");
+  note('kitchen',"Mother made stew I can't taste. She says she makes it anyway. She laid her hand beside mine on the table and didn't touch me.");
+}
+
+function* finaleScene(){
+  if(F.finale)return;
+  F.finale=1;
+  healAll();
+  yield say("The lamp room. Glass on all sides, black fen below, moonlight like spilled milk.",
+    "Professor Alder stands at the lamp's brass heart. For the first time since you met him, there is no table between you.",
+    "Alder: Fifteen years. I rehearsed this so many times. In every version, you were smaller.",
+    "Alder: Sit, if you like. You won't. You never do.");
+  yield ask("What do you say?",["What am I?","Why did you let me?","Tell me everything."]);
+  yield say("Alder: The Hollow is the oldest predator in the fen. It was never meant to be killed. It can't be. It can only be fed, or sealed.",
+    "Alder: Fifteen years ago the Council sealed the last. Or so we thought. A fragment slipped away in the Great Rain, starving, wounded, small.",
+    "Alder: It crawled into Ashmere and scratched at the door of a woman named Edda.",
+    "Alder: Her daughter, Wren, had died of fever that spring. The Hollow, you, wanted warmth. It wanted a shape that would be let in. And it chose the one she was most desperate to see.",
+    "Alder: I found you the next morning in her kitchen, eating bread you couldn't taste. Edda looked at me with a look I have never forgotten. And I did not report you.",
+    "Alder: I told myself I would study you. A Hollow that forgot itself! I gave you a childhood. A hobby. Catch and Cage. Feed the hunger a little at a time, until it passes for play.",
+    "Alder: The Wilds in your cages aren't kept, child. They're fed on. A little each time. That is how a Hollow stays small.",
+    "Alder: You typed a name on your first morning, do you remember? You didn't have one. You needed one. 'Wren' never came to you, did it?",
+    "Alder: The Council wants you sealed. They're right. I have known they're right for fifteen years, and I could not do it.",
+    "Alder: So here is my failure. Fight me. If you cannot beat an old man and his hounds, you are no danger to anyone.",
+    "Alder: The seal is in this lamp. I can use it on you now, or I can fail. Let your hands decide. I'm too much of a coward to.");
+  while(true){
+    const r=yield* doBattle({kind:'trainer',team:[{sp:'wardhound',lv:18},{sp:'gloomjaw',lv:19},{sp:'elderhart',lv:21}],trainer:{name:'Professor Alder'},bg:'tower'});
+    if(r==='win'||r==='ran')break;
+    healAll();yield say("Alder: Not yet. Rest. Again.");
+  }
+  yield say("Alder: ...Good. Good.","He sits down on the stair, suddenly very old.",
+    "Footsteps on the stairs. Uneven. Someone climbing too fast, too old.");
+  F.motherHere=true;
+  yield say("Edda: Don't. Please. Both of you.",
+    "She is wearing her gloves. She made them herself, for you, and you have never once thought to ask why they were so big.",
+    "Edda: I'm not asking you to be Wren. I stopped asking years ago.",
+    "Edda: Alder. You've carried the telling for fifteen years. Let me carry the rest.",
+    "Edda: Sit with me, both of you. Please.");
+  note('finale',"I am the Hollow. I was never hunting the Wilds. I was eating.");
+  yield fade(1,600);
+  yield cut("Fifteen years ago. The seventh night of the Great Rain. Wren is buried by noon.",
+    "Edda sits alone at the kitchen table with a child's drawing in her fist and a house so quiet she can hear her own blood.",
+    "Something scratches at the window. She does not look. She knows what scratches at windows in the rain, and she is past caring.",
+    "It comes in. It is small, and starving, and it has already learned her daughter's face from the way she was crying.",
+    "It stands there with Wren's gap-toothed mouth and Wren's small hands, and it looks at Edda the way a wolf looks at something it has not yet decided about.",
+    "Edda knew exactly what it was. She asked, 'Are you hungry?'",
+    "'Yes,' it said.",
+    "She set the table for three. And she did not run.");
+  yield fade(0,700);
+  yield say("Edda: I knew in an hour. You didn't cough. You didn't blink. You looked at my throat when you thought I wasn't watching.",
+    "Edda: I could have called the Wardens. I didn't. I would rather be eaten by something wearing her face than sit in that silence one more night.",
+    "Edda: That wasn't love, {n}. Don't let anyone tell you it was. It was need. I was a coward, and you were a monster, and we kept each other alive.",
+    "Edda: I found the marks under your mattress when you were ten. I thought it was a game.",
+    "Edda: It isn't. Every time you remember what you are, you scratch a line. And then you choose to forget. Nobody makes you. I never asked you to.",
+    "Edda: Four hundred and twelve times you have known, and chosen to be my child instead. And every morning you call me Mother.",
+    "Edda: I have never decided whether that is the cruellest thing I've done, or the kindest.",
+    "She takes off her gloves, first one, then the other. Her hands are old and spotted and shaking.",
+    "In fifteen years she has never once touched your face. She stops, an inch away, the way she always has.",
+    "And then she closes the inch.",
+    "Her palm is warm. For one breath you remember everything: the grass, the small warm things, the taste of her grief on the first night.",
+    "The hunger does not go away. It sits behind your eyes, patient, and looks at her throat. She can feel it. She does not pull her hand away.",
+    "Edda: {n}. It's the name you gave yourself. It was never hers. It was only ever yours.",
+    "Edda: Whatever you decide, I'm not going anywhere. I have never been brave. I have only been here.");
+  note('forget',"Edda knew from the first hour. She let me in because she couldn't bear the quiet. The marks under my mattress are every time I remembered what I am and chose to forget.");
+  const c=yield ask("What will you do?",["Let them seal me.","Open every cage. Go to the fen.","Eat.","Take the mask. Go home. Forget."]);
+  yield* ending(c);
+}
+
+function* ending(k){
+  const names=['SEALED','THE FEN','THE HOLLOW','THE MASK'];
+  yield fade(1,900);
+  const L=[
+    ["You walk to the lamp yourself.","Alder's hands shake on the brass. 'It won't hurt,' he says, and for once he sounds like a liar by choice.","Light fills the lamp room. Gold, not white. The colour of the lamp in Edda's kitchen.","Across the fen, the Wilds you caged wake and remember how to sing.","Edda holds your gloved hand until the light is gone. She does not let go first. She never once lets go first.","In Ashmere, Edda sets the table for one. Then a second plate, then a third, and sits with all of them until the soup goes cold.","Under the mattress, the marks have stopped at 412. She keeps the chalk anyway, in case you come home and need to start again.","On the pier at dusk, three figures in cream cloaks light a candle and do not say why. A Dusklet circles the flame until it burns down.","Pip leaves a crumb on the pier. In the morning it is still there. She leaves a second one, just to be sure."],
+    ["You take every Cage from your belt and open them, one by one.","Nobody runs. They look at you a long time. Then they go, into the reeds, into the dark, into being something that is not yours.",G.mercy>=5?"The fen remembers every Wild you let go. They gather at the shore to see you off.":"The fen does not forgive you. But it makes room.","The Elder Heron waits at the water. 'You are still hungry,' it says. 'So are we all. Come and learn what to do with it.'","You do not go home that night. Or the next. Edda leaves the window open, as always.","In Ashmere, children say a quiet creature watches from the reeds at dusk. They leave bread on the pier. It takes the bread, though it can't taste it.","Vesper, Tuck and a Dusklet named Mothball build a small house at the edge of the reeds, with a lantern in every window. They have retired from villainy. Reluctantly.","Edda leaves the window open, as always. One morning there is a crumb on the sill and a name scratched beside it, in a hand that is still learning to write.","Some mornings it leaves a feather in return."],
+    ["The Cages open, but not to release.","Everything you have ever caged comes back to you, and it is warm, and it is yours. You remember how to eat.","Alder doesn't scream. He seems, if anything, relieved.","Edda reaches out a gloved hand. You look at it for a long moment. You have never been able to taste bread. But you have an excellent memory for what everything else tastes like.","By morning, Ashmere is quiet. Not silent. Quiet, the way a held breath is quiet.","No bird sings. Pip's mother does not let her out.","Vesper stands in the lane with a lantern held high, the only one who does not run. 'You will not have her,' she says, and her voice breaks on it. 'Not her.'","And somewhere in the fen, an enormous, lonely thing lies down at last, full. A single Dusklet circles it, and does not leave."],
+    ["Alder opens his palm. In it, a small bronze charm: the amulet he has worn every day you have known him.","'The last of its kind,' he says. 'One more mask. One more childhood. You won't remember. Edda will.'","You nod. Edda cries. The brass lamp burns the memory out of you, gently, like falling asleep in a warm bath.","You wake in a narrow bed in Ashmere. Seven days of rain, then quiet. Something tastes strange in your mouth.","Mother calls up the stairs: 'Today's the day!'","Under the mattress, the wood is scratched with thousands of tally marks. You know exactly what they count. Each is a time you knew, and chose to forget. You do not know how many it will take.","Edda watches you from the doorway the way one watches a door one still leaves unlocked. 'Good morning, dear,' she says, and does not say the name.","On the pier, three strangers in cream cloaks leave bread out at dusk. They cannot say why. A Dusklet taps at your window every night, and every night you leave it open.","Tonight you scratch another."]
+  ][k];
+  yield cut(...L);
+  S.end={name:names[k],k};S.mode='endcard';gen=null;cur=null;
+  saveGame();
+}
+// ===== MAIN: title, new game, loop, debug =====
+function newGame(name){
+  G={name,map:'home',party:[],box:[],bag:{cage:0,iron:0,salve:0},money:0,F:{},notes:[],seen:{},caught:{},
+    steps:0,mercy:0,spared:0,hunted:0,lastHeal:{map:'ashmere',x:7,y:9},mask:false,x:2,y:3,dir:0};
+  F=G.F;
+}
+function* introScript(){
+  S.mode='intro';
+  yield cut("ASHMERE.","Seven days of rain. Then, this morning, quiet.","You wake with a taste in your mouth you can't name.");
+  const name=yield {t:'name'};
+  G.name=name;S.fade=1;
+  setMap('home',2,3,0);S.mode='world';
+  yield wait(300);yield fade(0,900);
+  yield say("Today the Wardens open the License to Ashmere's young. Everyone has been talking about it for weeks.",
+    "You have been talking about it too.","You don't remember deciding to want it.",
+    "Mother is by the stove, humming. She stops when she sees you're awake.");
+}
+function startNew(){
+  newGame('');S.fade=0;
+  startScript(introScript);
+}
+function continueGame(){
+  const s=loadSave();if(!s)return;
+  G=s;F=G.F;setMap(G.map,G.x,G.y,G.dir);S.mode='world';S.fade=0;
+}
+function toTitle(){G=null;F={};S.mode='title';S.sel=0;S.fade=0;S.menu=null;gen=null;cur=null;S.end=null;}
+
+function updTitle(){
+  const has=!!loadSave();
+  if(isU()||isD())S.sel=has?1-S.sel:0;
+  if(isA()){
+    sfx(520,.06);
+    if(S.sel===0)startNew();else if(has)continueGame();
+  }
+}
+function drawTitle(){
+  const gr=g.createLinearGradient(0,0,0,H);gr.addColorStop(0,'#08060e');gr.addColorStop(1,'#1c1230');
+  g.fillStyle=gr;g.fillRect(0,0,W,H);
+  // cages with trembling wilds
+  const ids=['embit','mossling','flitwing','puddlet','zapkit'];
+  ids.forEach((id,i)=>{const x=110+i*145,y=250;
+    g.globalAlpha=.55;g.fillStyle='#16101f';g.fillRect(x-45,y-50,90,100);g.strokeStyle='#4a3a5a';g.lineWidth=3;
+    for(let k=-1;k<=1;k++){g.beginPath();g.moveTo(x+k*28,y-50);g.lineTo(x+k*28,y+50);g.stroke();}
+    drawMon(id,x,y,60,{fear:true});g.globalAlpha=1;});
+  // the figure and its shadow
+  g.save();g.translate(W/2-48,380);g.scale(3,3);human(0,0,2,{col:'#3a5ea8',glove:'#3a3a44',hair:'#2a1a1a'},false);g.restore();
+  g.fillStyle='rgba(0,0,0,.55)';const hx=W/2+80,hy=490;
+  g.beginPath();g.moveTo(W/2-30,468);g.lineTo(W/2+10,468);g.lineTo(hx+14,hy);g.lineTo(hx-14,hy);g.fill();
+  g.beginPath();g.arc(hx,hy,24,0,7);g.fill();
+  tri(hx-14,hy-12,hx-30,hy-52,hx-4,hy-20,'rgba(0,0,0,.55)');tri(hx+14,hy-12,hx+30,hy-52,hx+4,hy-20,'rgba(0,0,0,.55)');
+  for(let i=0;i<4;i++)g.fillRect(hx-30+i*12,hy+24,3,28);
+  const glitch=Math.floor(S.t*3)%11===0;
+  text('HOLLOW HUNT',W/2+(glitch?4:0),70,64,glitch?'#d83a3a':'#e8c660','center',true);
+  if(glitch)text('HOLLOW HUNT',W/2-3,72,64,'#3a9ad8','center',true);
+  text('Catch them all. Ask yourself why.',W/2,150,20,'#a898c8','center',false,true);
+  const has=!!loadSave();
+  text((S.sel===0?'▶ ':'  ')+'NEW GAME',W/2,H-90,24,S.sel===0?'#e8c660':'#8a80a0','center');
+  if(has)text((S.sel===1?'▶ ':'  ')+'CONTINUE',W/2,H-56,24,S.sel===1?'#e8c660':'#8a80a0','center');
+  text('Arrows / WASD move   Z / Enter confirm   X / Esc back / menu',W/2,H-22,13,'#5a5070','center');
+}
+function drawEnd(){
+  g.fillStyle='#000';g.fillRect(0,0,W,H);
+  const e=S.end;
+  text('ENDING '+(e.k+1)+' OF 4',W/2,60,16,'#6a6078','center');
+  text(e.name,W/2,90,64,['#e8c660','#58b04a','#d83a3a','#c8c8dc'][e.k],'center',true);
+  const st=[`Wilds caged: ${G.hunted}`,`Wilds spared or released: ${G.spared}`,`Journal entries: ${G.notes.length}`,`Steps taken: ${G.steps}`];
+  st.forEach((s,i)=>text(s,W/2,200+i*30,20,'#d8d0e8','center'));
+  box(100,350,600,140);
+  text('WILDBOOK  #000',130,368,18,'#d83a3a',undefined,true);
+  wrap("THE HOLLOW. It wears the shape of a child. It hungers. It did not know it was hungry. Seen: 1. Caged: 0.",520,FONT(18)).forEach((ln,i)=>text(ln,130,400+i*26,18,'#d8d0e8'));
+  if(Math.floor(S.t*2)%2)text('Press Z to return to the title',W/2,520,18,'#8a80a0','center');
+}
+
+function update(dt){
+  S.t+=dt;
+  for(const k of ['area','toast','whisper'])if(S[k]&&S[k].t>0)S[k].t-=dt;
+  if(S.shakeT>0)S.shakeT-=dt;
+  if(Math.floor(S.t)%5===0)droneTick();
+  switch(S.mode){
+    case 'title':updTitle();break;
+    case 'intro':if(gen)updCmd(dt);break;
+    case 'world':updWorld(dt);break;
+    case 'battle':updBattleAnim(dt);if(gen)updCmd(dt);break;
+    case 'endcard':S.fade=0;if(isA()){toTitle();}break;
+  }
+  hit.clear();
+}
+function draw(){
+  switch(S.mode){
+    case 'title':drawTitle();break;
+    case 'intro':g.fillStyle='#000';g.fillRect(0,0,W,H);break;
+    case 'world':drawWorld();if(S.menu)drawMenu();break;
+    case 'battle':drawBattle();break;
+    case 'endcard':drawEnd();break;
+  }
+  const full=cur&&(cur.t==='cut'||cur.t==='name');
+  if(!full)drawCmd();
+  if(S.fade>0){g.fillStyle=`rgba(0,0,0,${S.fade})`;g.fillRect(0,0,W,H);}
+  if(full)drawCmd();
+}
+
+// ----- debug jumps (for testing): index.html#d=thornby -----
+function debugStart(k){
+  newGame('Ash');
+  const lv={ashmere:5,route1:6,thornby:10,route2:14,tower:17,tower2:19}[k]||5;
+  G.party=[mkMon('embit',lv),mkMon('zapkit',lv-1),mkMon('mossling',lv-1)];
+  G.bag={cage:8,iron:2,salve:5};G.money=900;F.mother1=1;F.labIntro=1;F.starter='embit';G.seen={embit:1,zapkit:1,mossling:1};G.caught={embit:1,zapkit:1};
+  G.notes=[{k:'a',t:'Debug note: reflections blink late.'}];
+  const to={home:['home',5,5],ashmere:['ashmere',14,12],route1:['route1',11,40],thornby:['thornby',15,24],route2:['route2',12,38],tower:['tower1',6,10],tower2:['tower2',6,9]}[k]||['ashmere',14,12];
+  if(['thornby','route2','tower','tower2'].includes(k)){F.bell=1;F.dellMeet=1;}
+  if(['route2','tower','tower2'].includes(k)){F.slept=1;F.maren=1;F.festival=1;F.burned=1;F.kes1done=1;}
+  if(['tower','tower2'].includes(k)){F.heron=1;F.haleDone=1;}
+  if(k==='tower2'){F.kesTower=1;}
+  setMap(to[0],to[1],to[2],0);S.mode='world';S.fade=0;
+}
+
+window.addEventListener('error',e=>{document.title='ERR '+e.message+' @'+e.lineno;});
+buildMaps();
+if(location.hash.includes('newgame'))startNew();
+{const h=location.hash.match(/d=(\w+)/);if(h){if(h[1]==='battle'){debugStart('route1');startScript(function*(){yield* doBattle({kind:'wild',team:[{sp:'mossling',lv:5}],bg:'grass'});});}
+  else if(h[1]==='menu'){debugStart('thornby');openMenu();}
+  else if(h[1]==='end'){debugStart('tower2');S.end={name:'THE MASK',k:3};S.mode='endcard';}
+  else if(h[1]==='mirror'){debugStart('home');F.starter='embit';}
+  else debugStart(h[1]);}}
+{const r=location.hash.match(/run=([a-z0-9]+)/);if(r){const n=r[1],T={finale:finaleScene,kestower:kesTowerScene,heron:heronScene,hale:haleTalk,sleep:sleepScene,festival:()=>{F.maren=1;F.festivalStart=1;return festivalScene();},kes1:kesRoute1,maren:()=>{F.t_corvin=1;F.t_ines=1;return marenTalk();},lab:()=>{G.party=[];F.labIntro=0;F.starter=null;return labIntro();},mother:()=>{F.mother1=0;return motherTalk();},end0:()=>ending(0),end1:()=>ending(1),end2:()=>ending(2),end3:()=>ending(3)};
+  if(n==='lab'){setMap('lab',6,7,0);G.bag={cage:0,iron:0,salve:0};}
+  startScript(function*(){yield* T[n]();});}}
+{const ff=location.hash.match(/ff=([0-9]+)/);if(ff){const auto=location.hash.includes('auto');for(let i=0;i<+ff[1];i++){if(auto&&i%3===0)hit.add('z');update(.05);}}}
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  try{update(dt);draw();if(location.hash.includes('dbg'))document.title='m='+S.mode+' t='+S.t.toFixed(1)+' cmd='+(cur?cur.t+(cur.L&&cur.L[cur.i]?':'+cur.L[cur.i].txt.slice(0,50):''):'-');}catch(e){console.error(e);document.title='ERR '+e.message;}
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();</script></body></html>
